@@ -1,0 +1,11 @@
+.git
+.env*
+private
+inputs
+output
+__pycache__
+.venv
+.pytest_cache
+*.pdf
+*.docx
+*.csv
