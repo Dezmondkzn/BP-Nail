@@ -24,7 +24,9 @@ class Quotes:
             authorize(user)
             return user
 
-    def bootstrap(self, uid, name):
+    def bootstrap(self, uid, name, manager_id=0, manager_name="Менеджер"):
+        if uid < 0 or manager_id < 0 or (manager_id and (not uid or manager_id == uid)):
+            raise BusinessError("Для начальных ролей нужны разные положительные Telegram ID.")
         if not uid:
             return
         with self.sessions.begin() as s:
@@ -32,6 +34,9 @@ class Quotes:
             if not s.get(AppValue, "bootstrap_done"):
                 if s.scalar(select(User.telegram_id).limit(1)) is None:
                     s.add(User(telegram_id=uid, name=name, role=Role.CHIEF, department="main"))
+                    if manager_id:
+                        s.add(User(telegram_id=manager_id, name=manager_name,
+                                   role=Role.MANAGER, department="main"))
                 s.add(AppValue(key="bootstrap_done", value={"done": True}))
 
     def set_user(self, actor_id, uid, role, department, name, active=True):
