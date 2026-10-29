@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     database_url: str
     bootstrap_admin_id: int = 0
     bootstrap_admin_name: str = "Начальник"
+    bootstrap_manager_id: int = 0
+    bootstrap_manager_name: str = "Менеджер"
     openai_api_key: SecretStr = SecretStr("")
     openai_text_model: str = ""
     openai_transcribe_model: str = ""
