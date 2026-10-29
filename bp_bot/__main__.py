@@ -27,7 +27,10 @@ async def main():
             engine.dispose()
             raise RuntimeError("Another bot process is already running")
     quotes = Quotes(sessions, CBR(), settings.timezone)
-    await asyncio.to_thread(quotes.bootstrap, settings.bootstrap_admin_id, settings.bootstrap_admin_name)
+    await asyncio.to_thread(
+        quotes.bootstrap, settings.bootstrap_admin_id, settings.bootstrap_admin_name,
+        settings.bootstrap_manager_id, settings.bootstrap_manager_name,
+    )
     store, ai = storage(settings), AI(settings)
     worker = Worker(sessions, store, settings.soffice_path)
     stop = asyncio.Event()
