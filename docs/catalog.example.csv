@@ -1,0 +1,2 @@
+sku,name,configuration,price,currency,supply,price_date,valid_until,vat_rate,active
+DEMO-001,Демонстрационная техника,Пример комплектации,122000.00,RUB,stock,2026-01-01,2026-12-31,22,true
