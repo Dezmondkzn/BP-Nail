@@ -102,15 +102,28 @@ class ProductChoice(BusinessError):
         super().__init__("Уточните комплектацию: выберите подходящую технику.")
 
 
-def search_products(products, query):
+def word_similarity(left, right):
     from difflib import SequenceMatcher
+
+    # Inflected configuration words are suggestions, never exact auto-selections.
+    endings = ("aya", "uyu", "ogo", "omu", "ymi", "oi", "yi", "ye", "ym", "a", "y", "e", "u")
+
+    def stems(word):
+        return {word[: -len(end)] for end in endings if word.endswith(end) and len(word) - len(end) >= 5}
+
+    if stems(left) & stems(right):
+        return 0.9
+    return SequenceMatcher(None, left, right).ratio()
+
+
+def search_products(products, query):
 
     products = [p for p in products if p.active]
     query = query.strip()
     exact = [p for p in products if p.sku.casefold() == query.casefold()]
     if exact:
         return exact, True
-    words = normalized(query).split()
+    words = [w for w in normalized(query).split() if w not in {"s", "so", "i"}]
     if not words:
         return [], False
     numbers = {w for w in words if w.isdigit()}
@@ -126,7 +139,7 @@ def search_products(products, query):
             if w in tokens
             else max(
                 (
-                    SequenceMatcher(None, w, t).ratio()
+                    word_similarity(w, t)
                     for t in tokens
                     if not w.isdigit() and not t.isdigit() and min(len(w), len(t)) >= 4
                 ),
