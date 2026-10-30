@@ -76,7 +76,7 @@ class AI:
             raise BusinessError("Не удалось разобрать запрос. Переформулируйте или используйте поля с =.")
         return result.output_parsed.safe()
 
-    async def transcribe(self, raw):
+    async def transcribe(self, raw, prompt=""):
         if not self.client or not self.settings.openai_transcribe_model:
             raise BusinessError("Распознавание речи ещё не настроено.")
         if len(raw) > self.settings.max_file_bytes:
@@ -110,7 +110,10 @@ class AI:
             )
             with dst.open("rb") as f:
                 transcript = await self.client.audio.transcriptions.create(
-                    model=self.settings.openai_transcribe_model, file=f, language="ru"
+                    model=self.settings.openai_transcribe_model,
+                    file=f,
+                    language="ru",
+                    **({"prompt": prompt} if prompt else {}),
                 )
             return transcript.text
 

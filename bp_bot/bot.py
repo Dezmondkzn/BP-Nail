@@ -245,7 +245,8 @@ class UI:
                         raise BusinessError("Голосовое должно быть не длиннее 3 минут и не больше 10 МБ.")
                     raw = io.BytesIO()
                     await self.bot.download(m.voice, destination=raw)
-                    text = await self.ai.transcribe(raw.getvalue())
+                    prompt = await asyncio.to_thread(self.quotes.transcription_prompt, uid)
+                    text = await self.ai.transcribe(raw.getvalue(), prompt=prompt)
                     token = uuid.uuid4().hex[:16]
                     await asyncio.to_thread(
                         self.state,

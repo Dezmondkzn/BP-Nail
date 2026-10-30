@@ -94,6 +94,31 @@ class Quotes:
             rows = list(s.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.sku)))
             return (search_products(rows, query)[0] if query.strip() else rows)[:30]
 
+    def transcription_prompt(self, uid):
+        self.user(uid)
+        with self.sessions() as s:
+            names = s.scalars(
+                select(Product.name).where(Product.active.is_(True)).distinct().order_by(Product.name)
+            ).all()
+        if not names:
+            return ""
+        prompt = (
+            "Русская речь о сельскохозяйственной технике для коммерческого предложения. "
+            "Названия из каталога приведены только как подсказка написания марок и моделей; "
+            "не добавляй их, если они не произнесены. Сохраняй произнесённые номера моделей.\n"
+        )
+        seen = set()
+        for name in names:
+            name = " ".join(name.split())
+            if not name or name.casefold() in seen:
+                continue
+            seen.add(name.casefold())
+            entry = name + "; "
+            if len(prompt) + len(entry) > 6000:
+                break
+            prompt += entry
+        return prompt.rstrip("; ")
+
     def resolve_product(self, uid, query):
         self.user(uid)
         with self.sessions() as s:
