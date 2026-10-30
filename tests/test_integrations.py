@@ -114,3 +114,60 @@ def test_malformed_cbr_xml_fails_closed():
     cbr = CBR(httpx.MockTransport(lambda _: httpx.Response(200, content=b"<broken")))
     with pytest.raises(BusinessError, match="Не удалось получить курс"):
         cbr.rate("EUR", date(2026, 10, 29))
+
+
+def test_transcription_catalog_context(service, monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from bp_bot.models import Product
+
+    with service.sessions.begin() as session:
+        for n in range(40):
+            session.add(
+                Product(
+                    sku=f"HINT{n}",
+                    name=f"GRITAN БНП {300 + n}",
+                    configuration="PRIVATE CONFIG",
+                    price=123456,
+                    currency="RUB",
+                    supply="stock",
+                    price_date="2026-01-01",
+                    valid_until="2026-12-31",
+                    vat_rate=22,
+                    active=True,
+                )
+            )
+        session.get(Product, "A").active = False
+    prompt = service.transcription_prompt(2)
+    assert "БНП 339" in prompt  # Not limited to the 30-row /catalog page.
+    assert prompt.count("Трактор 100") == 1
+    assert "Бункер 401" not in prompt
+    assert "123456" not in prompt and "PRIVATE CONFIG" not in prompt
+    assert len(prompt) <= 6000
+    with pytest.raises(BusinessError):
+        service.transcription_prompt(999)
+
+    settings = Settings(
+        bot_token="123456:TEST",
+        database_url="sqlite://",
+        app_env="development",
+        storage_backend="local",
+        openai_api_key="",
+        openai_transcribe_model="gpt-4o-mini-transcribe",
+    )
+    ai = AI(settings)
+    create = AsyncMock(return_value=SimpleNamespace(text="Гритан БНП 301"))
+    ai.client = SimpleNamespace(audio=SimpleNamespace(transcriptions=SimpleNamespace(create=create)))
+
+    def convert(args, **kwargs):
+        Path(args[-1]).write_bytes(b"wav")
+
+    monkeypatch.setattr("bp_bot.ai.subprocess.run", convert)
+    assert asyncio.run(ai.transcribe(b"ogg", prompt=prompt)) == "Гритан БНП 301"
+    assert create.call_args.kwargs["prompt"] == prompt
+    assert create.call_args.kwargs["language"] == "ru"
+    with service.sessions.begin() as session:
+        for p in session.scalars(select(Product)):
+            p.active = False
+    assert service.transcription_prompt(2) == ""
