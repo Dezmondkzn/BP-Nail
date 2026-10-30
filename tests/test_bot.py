@@ -124,3 +124,26 @@ def test_search_spelling_variants_and_model_safety(service):
     with pytest.raises(BusinessError, match="не найдена"):
         match_product([p], "X")
     assert [p.sku for p in service.catalog(2, "Трактоор 100")] == ["B", "C"]
+
+
+def test_voice_configuration_inflections():
+    from types import SimpleNamespace
+    import pytest
+    from bp_bot.catalog import search_products, match_product, ProductChoice
+    from bp_bot.domain import BusinessError
+
+    p = SimpleNamespace(
+        sku="AT26-93C65E2C7D10",
+        name="GRITAN Бункер накопитель БНП 301",
+        configuration="Гидр. шиберные заслонки; Гидр.-расскладной склиз шнека; Тентовая система.",
+        active=True,
+    )
+    query = "«Гритан» бункер-накопитель BNP-301 с тентовой системой"
+    assert search_products([p], query) == ([p], False)
+    with pytest.raises(ProductChoice) as choice:
+        match_product([p], query)
+    assert choice.value.products == [p]
+    assert match_product([p], p.sku) is p
+    for wrong in (query.replace("301", "401"), query.replace("с тентовой", "без тентовой"), "с и со"):
+        with pytest.raises(BusinessError, match="не найдена"):
+            match_product([p], wrong)
