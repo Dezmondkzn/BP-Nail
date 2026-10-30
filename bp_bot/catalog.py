@@ -44,19 +44,112 @@ def parse_catalog(raw: bytes):
         ) from None
 
 
+# A single spelling space for Russian voice transcripts and Latin model names.
+_TRANSLIT = str.maketrans(
+    dict(
+        zip(
+            "абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+            [
+                "a",
+                "b",
+                "v",
+                "g",
+                "d",
+                "e",
+                "e",
+                "zh",
+                "z",
+                "i",
+                "i",
+                "k",
+                "l",
+                "m",
+                "n",
+                "o",
+                "p",
+                "r",
+                "s",
+                "t",
+                "u",
+                "f",
+                "h",
+                "ts",
+                "ch",
+                "sh",
+                "sch",
+                "",
+                "y",
+                "",
+                "e",
+                "yu",
+                "ya",
+            ],
+        )
+    )
+)
+
+
 def normalized(s):
-    return re.sub(r"[^\w]+", " ", s.casefold()).strip()
+    s = s.casefold().translate(_TRANSLIT)
+    s = re.sub(r"([a-z])(\d)|(?<=\d)(?=[a-z])", lambda m: m[1] + " " + m[2] if m[1] else " ", s)
+    return " ".join(re.findall(r"[a-z]+|\d+", s))
+
+
+class ProductChoice(BusinessError):
+    def __init__(self, query, products):
+        self.query = query
+        self.products = products[:8]
+        super().__init__("Уточните комплектацию: выберите подходящую технику.")
+
+
+def search_products(products, query):
+    from difflib import SequenceMatcher
+
+    products = [p for p in products if p.active]
+    query = query.strip()
+    exact = [p for p in products if p.sku.casefold() == query.casefold()]
+    if exact:
+        return exact, True
+    words = normalized(query).split()
+    if not words:
+        return [], False
+    numbers = {w for w in words if w.isdigit()}
+    ranked = []
+    for p in products:
+        name = normalized(p.name).split()
+        # Never turn a mistyped model number into a different model.
+        if not numbers.issubset(set(name)):
+            continue
+        tokens = set(name + normalized(p.configuration).split())
+        scores = [
+            1.0
+            if w in tokens
+            else max(
+                (
+                    SequenceMatcher(None, w, t).ratio()
+                    for t in tokens
+                    if not w.isdigit() and not t.isdigit() and min(len(w), len(t)) >= 4
+                ),
+                default=0,
+            )
+            for w in words
+        ]
+        if min(scores) >= 0.72:
+            ranked.append((sum(scores) / len(scores), p))
+    ranked.sort(key=lambda row: (-row[0], row[1].sku))
+    exact = [p for score, p in ranked if score == 1]
+    if exact:
+        return exact, True
+    return [p for _, p in ranked], False
 
 
 def match_product(products, query):
-    exact = [p for p in products if p.sku.casefold() == query.casefold()]
-    if exact:
-        return exact[0]
-    q = normalized(query)
-    candidates = [p for p in products if q and q in normalized(p.name + " " + p.configuration)]
-    if len(candidates) == 1:
+    candidates, exact = search_products(products, query)
+    if len(candidates) == 1 and exact:
         return candidates[0]
     if candidates:
-        options = "; ".join(f"{p.sku}: {p.name}" for p in candidates[:8])
-        raise BusinessError("Уточните комплектацию и укажите SKU: " + options)
-    raise BusinessError("Техника не найдена. Откройте /catalog и укажите точный SKU.")
+        raise ProductChoice(query, candidates)
+    raise BusinessError(
+        "Техника не найдена. Укажите марку и модель без дополнительных слов "
+        "или найдите её через /catalog название."
+    )
