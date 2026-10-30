@@ -14,6 +14,7 @@ from aiogram.types import (
     BotCommand,
 )
 from pydantic import ValidationError
+from .catalog import ProductChoice
 from .domain import BusinessError, ProposalPatch, authorize
 from .models import AppValue
 from .documents import validate_letterhead
@@ -134,12 +135,50 @@ class UI:
             )
 
     async def submit(self, message, text, key, state):
-        uid = message.chat.id
         patch = await self.ai.parse(text, self.quotes.today())
         if not patch.model_dump(exclude_none=True, exclude={"forbidden_requests"}):
             raise BusinessError(
                 "Не найдены поля КП. Укажите клиента, SKU и количество, срок поставки и срок предложения."
             )
+        await self.submit_patch(message, patch, key, state)
+
+    async def submit_patch(self, message, patch, key, state):
+        uid = message.chat.id
+        for index, item in enumerate(patch.items or []):
+            try:
+                product = await asyncio.to_thread(self.quotes.resolve_product, uid, item.product_query)
+                item.product_query = product.sku
+            except ProductChoice as choice:
+                token = uuid.uuid4().hex[:16]
+                await asyncio.to_thread(
+                    self.state,
+                    uid,
+                    {
+                        "mode": "product",
+                        "token": token,
+                        "patch": patch.model_dump(mode="json"),
+                        "index": index,
+                        "options": [p.sku for p in choice.products],
+                        "request_key": key,
+                        "target": state,
+                    },
+                )
+                lines = [f"Уточните комплектацию для «{choice.query}». Выберите позицию:"]
+                keyboard = []
+                for n, p in enumerate(choice.products):
+                    lines.append(
+                        f"{n + 1}. {p.name} — {p.configuration[:240]}\n{p.price} {p.currency}; {p.sku}"
+                    )
+                    keyboard.append(
+                        [
+                            InlineKeyboardButton(
+                                text=f"{n + 1}. {p.name}"[:60], callback_data=f"product:{token}:{n}"
+                            )
+                        ]
+                    )
+                keyboard.append([InlineKeyboardButton(text="Отменить", callback_data="cancel")])
+                await self.send(message, "\n\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard))
+                return
         if state and state.get("mode") == "edit":
             result = await asyncio.to_thread(
                 self.quotes.revise, uid, state["id"], state["version"], patch, key
@@ -346,6 +385,8 @@ class UI:
                 elif command.startswith("/"):
                     await m.answer("Неизвестная команда. Откройте /help.")
                 else:
+                    if state and state.get("mode") == "product":
+                        raise BusinessError("Выберите технику кнопкой или отмените ввод /cancel.")
                     if state and state.get("mode") == "voice":
                         raise BusinessError("Подтвердите голосовое кнопкой или отмените ввод /cancel.")
                     await self.submit(m, text, request_key, state)
@@ -370,6 +411,16 @@ class UI:
                 if data[0] == "cancel":
                     await asyncio.to_thread(self.state, uid, delete=True)
                     await c.message.answer("Ввод отменён.")
+                elif data[0] == "product":
+                    st = await asyncio.to_thread(self.state, uid)
+                    if not st or st.get("mode") != "product" or st.get("token") != data[1]:
+                        raise BusinessError("Этот выбор уже обработан или отменён.")
+                    selection = int(data[2])
+                    if not 0 <= selection < len(st["options"]):
+                        raise BusinessError("Недопустимая позиция.")
+                    patch = ProposalPatch.model_validate(st["patch"])
+                    patch.items[st["index"]].product_query = st["options"][selection]
+                    await self.submit_patch(c.message, patch, st["request_key"], st["target"])
                 elif data[0] == "voice":
                     st = await asyncio.to_thread(self.state, uid)
                     if not st or st.get("mode") != "voice" or st.get("token") != data[1]:

@@ -6,7 +6,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from .models import User, Product, Quote, Version, Audit, AppValue, RequestReceipt, Job, now
 from .domain import Role, BusinessError, authorize, money, totals, missing
-from .catalog import match_product, parse_catalog
+from .catalog import match_product, parse_catalog, search_products
 
 
 class Quotes:
@@ -35,8 +35,14 @@ class Quotes:
                 if s.scalar(select(User.telegram_id).limit(1)) is None:
                     s.add(User(telegram_id=uid, name=name, role=Role.CHIEF, department="main"))
                     if manager_id:
-                        s.add(User(telegram_id=manager_id, name=manager_name,
-                                   role=Role.MANAGER, department="main"))
+                        s.add(
+                            User(
+                                telegram_id=manager_id,
+                                name=manager_name,
+                                role=Role.MANAGER,
+                                department="main",
+                            )
+                        )
                 s.add(AppValue(key="bootstrap_done", value={"done": True}))
 
     def set_user(self, actor_id, uid, role, department, name, active=True):
@@ -86,7 +92,12 @@ class Quotes:
         self.user(uid)
         with self.sessions() as s:
             rows = list(s.scalars(select(Product).where(Product.active.is_(True)).order_by(Product.sku)))
-            return [p for p in rows if query.casefold() in (p.sku + " " + p.name).casefold()][:30]
+            return (search_products(rows, query)[0] if query.strip() else rows)[:30]
+
+    def resolve_product(self, uid, query):
+        self.user(uid)
+        with self.sessions() as s:
+            return match_product(list(s.scalars(select(Product).where(Product.active.is_(True)))), query)
 
     def set_letterhead(self, uid, key):
         with self.sessions.begin() as s:

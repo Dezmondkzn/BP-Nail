@@ -47,3 +47,80 @@ def test_telegram_text_flow_and_forbidden_user(service, tmp_path):
             assert s.get(RequestReceipt, "message:2:104") is not None
 
     asyncio.run(flow())
+
+
+def test_product_choice_preserves_request_and_rejects_stale_buttons(service, tmp_path):
+    settings = Settings(
+        bot_token="123456:TEST", database_url="sqlite://", app_env="development", storage_backend="local"
+    )
+    bot = Bot("123456:TEST")
+    bot.session = AsyncMock()
+    ui = UI(bot, service, AI(settings), LocalStorage(tmp_path), settings)
+
+    async def click(data, number):
+        await ui.dp.feed_update(
+            bot,
+            Update.model_validate(
+                {
+                    "update_id": number,
+                    "callback_query": {
+                        "id": str(number),
+                        "chat_instance": "test",
+                        "data": data,
+                        "from": {"id": 2, "is_bot": False, "first_name": "Test"},
+                        "message": {
+                            "message_id": 99,
+                            "date": 1793275200,
+                            "chat": {"id": 2, "type": "private"},
+                            "text": "Выберите",
+                        },
+                    },
+                }
+            ),
+        )
+
+    async def flow():
+        from aiogram.types import Message
+
+        message = Message.model_validate(
+            {"message_id": 98, "date": 1793275200, "chat": {"id": 2, "type": "private"}}
+        ).as_(bot)
+        await ui.submit(
+            message,
+            "клиент=Заря; позиции=Трактоор 100:2,Бункер 401:3; поставка=10 дней; до=2026-12-01",
+            "search-test",
+            None,
+        )
+        assert service.list_quotes(2) == []
+        st = ui.state(2)
+        data = f"product:{st['token']}:1"
+        await click(data, 200)
+        q = service.list_quotes(2)[0]["id"]
+        payload = service.view(2, q)["payload"]
+        assert payload["client"] == "Заря"
+        assert [(i["sku"], i["quantity"]) for i in payload["items"]] == [("C", 2), ("A", 3)]
+        assert payload["valid_until"] == "2026-12-01"
+        await click(data, 201)
+        assert "уже обработан" in bot.session.call_args.args[1].text
+        assert len(service.list_quotes(2)) == 1
+
+    asyncio.run(flow())
+
+
+def test_search_spelling_variants_and_model_safety(service):
+    from types import SimpleNamespace
+    import pytest
+    from bp_bot.catalog import match_product, ProductChoice
+    from bp_bot.domain import BusinessError
+
+    p = SimpleNamespace(sku="X", name="Бункер GRITAN БНП-401", configuration="Тент", active=True)
+    for query in ("Гритан БНП401", "gritan bnp 401", "401 gritan", "X"):
+        assert match_product([p], query) is p
+    with pytest.raises(ProductChoice):
+        match_product([p], "Гриттан БНП 401")
+    with pytest.raises(BusinessError, match="не найдена"):
+        match_product([p], "GRITAN БНП402")
+    p.active = False
+    with pytest.raises(BusinessError, match="не найдена"):
+        match_product([p], "X")
+    assert [p.sku for p in service.catalog(2, "Трактоор 100")] == ["B", "C"]
