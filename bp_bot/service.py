@@ -126,7 +126,7 @@ class Quotes:
 
     def set_letterhead(self, uid, key):
         with self.sessions.begin() as s:
-            authorize(s.get(User, uid), chief=True)
+            authorize(s.get(User, uid))
             v = s.get(AppValue, "letterhead")
             if v:
                 v.value = {"key": key}
@@ -232,17 +232,26 @@ class Quotes:
             raise BusinessError("Версия не найдена.")
         return q, v
 
+    def _with_letterhead(self, s, payload):
+        data = deepcopy(payload)
+        if not data.get("letterhead_key"):
+            head = s.get(AppValue, "letterhead")
+            if head:
+                data["letterhead_key"] = head.value["key"]
+        return data
+
     def view(self, uid, qid, number=None):
         with self.sessions() as s:
             q, v = self._get(s, uid, qid, number)
+            data = self._with_letterhead(s, v.payload) if v.status == "draft" else v.payload
             return {
                 "id": q.id,
                 "version": v.number,
                 "current_version": q.current_version,
                 "status": v.status,
-                "payload": v.payload,
+                "payload": data,
                 "created_at": v.created_at.isoformat(),
-                "missing": missing(v.payload, self.today()),
+                "missing": missing(data, self.today()),
             }
 
     def list_quotes(self, uid):
@@ -328,6 +337,7 @@ class Quotes:
                 raise BusinessError("Завершить можно только текущую версию.")
             if v.status == "finished":
                 return
+            v.payload = self._with_letterhead(s, v.payload)
             gaps = missing(v.payload, self.today())
             if gaps:
                 raise BusinessError("Нужно заполнить: " + "; ".join(gaps))
