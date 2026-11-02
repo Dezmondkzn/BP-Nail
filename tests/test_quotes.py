@@ -158,3 +158,21 @@ def test_delivery_field_cannot_override_payment_or_price(service):
     assert service.list_quotes(2) == []
     q = service.create(2, patch(delivery_terms="10 рабочих дней"), "good")["id"]
     assert service.view(2, q)["payload"]["delivery_terms"] == "В течение 10 рабочих дней после полной оплаты."
+
+
+
+def test_manager_completes_existing_draft_after_letterhead_upload(service):
+    from bp_bot.models import AppValue
+    with service.sessions.begin() as s:
+        s.delete(s.get(AppValue, "letterhead"))
+    q = service.create(2, patch(), "no-head")["id"]
+    assert any("бланк" in x for x in service.view(2, q)["missing"])
+    service.set_letterhead(2, "letterheads/manager.docx")
+    assert not service.view(2, q)["missing"]
+    service.finish(2, q, 1)
+    assert service.view(2, q)["payload"]["letterhead_key"] == "letterheads/manager.docx"
+    assert service.request_files(2, q, 1)["state"] == "queued"
+    service.set_letterhead(2, "letterheads/replacement.docx")
+    assert service.view(2, q)["payload"]["letterhead_key"] == "letterheads/manager.docx"
+    with pytest.raises(BusinessError):
+        service.set_letterhead(999, "letterheads/bad.docx")
