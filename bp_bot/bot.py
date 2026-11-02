@@ -35,13 +35,16 @@ HELP = """АТехника — коммерческие предложения
 клиент=ООО Заря; позиции=SKU:1; поставка=10 рабочих дней; до=2026-12-01
 Несколько позиций: позиции=SKU1:1,SKU2:2
 
+КП можно подготовить и завершить самостоятельно, без согласования.
+Общий бланк используется автоматически. Чтобы загрузить или заменить его,
+пришлите чистый DOCX с подписью /letterhead.
+
 Начальник:
 /users — пользователи
 /user ID manager|sales_head|chief ОТДЕЛ Имя Фамилия
 /disable ID — отключить пользователя
 /vat НОМЕР ВЕРСИЯ СТАВКА ПРИЧИНА — изменить НДС
 Пришлите CSV с подписью /import для обновления каталога.
-Пришлите чистый DOCX-бланк с подписью /letterhead.
 """
 
 
@@ -212,7 +215,8 @@ class UI:
                         raise BusinessError(
                             "Ручной Word пока не импортируется. Для правок используйте /edit."
                         )
-                    authorize(user, chief=True)
+                    if caption == "/import":
+                        authorize(user, chief=True)
                     if (m.document.file_size or 0) > self.settings.max_file_bytes:
                         raise BusinessError("Файл слишком большой.")
                     raw = io.BytesIO()
@@ -232,7 +236,7 @@ class UI:
                         )
                         await asyncio.to_thread(self.quotes.set_letterhead, uid, key)
                         await m.answer(
-                            "Бланк сохранён. Он будет использован для новых КП и новых версий без бланка."
+                            "Общий бланк сохранён. Он доступен всем менеджерам и подключится к черновикам без бланка при завершении."
                         )
                     return
                 state = await asyncio.to_thread(self.state, uid)

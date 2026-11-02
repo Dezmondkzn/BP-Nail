@@ -94,5 +94,5 @@ def missing(payload, today):
     elif date.fromisoformat(payload["valid_until"]) < today:
         fields.append("срок предложения истёк")
     if not payload.get("letterhead_key"):
-        fields.append("фирменный бланк (начальник загружает DOCX с подписью /letterhead)")
+        fields.append("фирменный бланк (загрузите DOCX с подписью /letterhead)")
     return fields
