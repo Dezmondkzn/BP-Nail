@@ -140,31 +140,38 @@ def generate(letterhead, view, soffice="soffice"):
     with tempfile.TemporaryDirectory(prefix="bp_doc_") as temp:
         root = Path(temp)
         template = root / "template.docx"
-        build_template(letterhead, template)
-        doc = DocxTemplate(template)
-        items = [
-            dict(i, unit_display=rub(i["unit_price"]), total_display=rub(i["line_total"])) for i in p["items"]
-        ]
-        fx = [
-            f"{i['sku']}: {i['currency']}, курс {i['rate']} ₽ за 1 ед. на {i['rate_date']}."
-            for i in p["items"]
-            if i["currency"] != "RUB"
-        ]
-        context = dict(
-            p,
-            items=items,
-            number=f"КП-{view['id']:05d}",
-            version=view["version"],
-            issued=date.fromisoformat(view["created_at"][:10]).strftime("%d.%m.%Y"),
-            gross=rub(p["totals"]["gross"]),
-            vat=rub(p["totals"]["vat"]),
-            net=rub(p["totals"]["net"]),
-            fx_note="\n".join(fx),
-        )
-        context["valid_until"] = date.fromisoformat(p["valid_until"]).strftime("%d.%m.%Y")
-        doc.render(context, jinja_env=SandboxedEnvironment(undefined=StrictUndefined), autoescape=True)
         output = root / "proposal.docx"
-        doc.save(output)
+        if p.get("template_version") == "2":
+            from .proposal_document import build_proposal
+
+            build_proposal(letterhead, view, output)
+        else:
+            build_template(letterhead, template)
+            doc = DocxTemplate(template)
+            items = [
+                dict(i, unit_display=rub(i["unit_price"]), total_display=rub(i["line_total"]))
+                for i in p["items"]
+            ]
+            fx = [
+                f"{i['sku']}: {i['currency']}, курс {i['rate']} ₽ за 1 ед. на {i['rate_date']}."
+                for i in p["items"]
+                if i["currency"] != "RUB"
+            ]
+            context = dict(
+                p,
+                items=items,
+                number=f"КП-{view['id']:05d}",
+                version=view["version"],
+                issued=date.fromisoformat(view["created_at"][:10]).strftime("%d.%m.%Y"),
+                gross=rub(p["totals"]["gross"]),
+                vat=rub(p["totals"]["vat"]),
+                net=rub(p["totals"]["net"]),
+                fx_note="\n".join(fx),
+            )
+            context["valid_until"] = date.fromisoformat(p["valid_until"]).strftime("%d.%m.%Y")
+            doc.render(context, jinja_env=SandboxedEnvironment(undefined=StrictUndefined), autoescape=True)
+            output = root / "proposal.docx"
+            doc.save(output)
         profile = (root / "lo_profile").as_uri()
         subprocess.run(
             [
