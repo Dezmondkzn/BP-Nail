@@ -41,6 +41,12 @@ class Worker:
             job_id, attempts = job.id, job.attempts
         try:
             head = self.storage.get(view["payload"]["letterhead_key"])
+            images = {}
+            for item in view["payload"]["items"]:
+                key = (item.get("profile") or {}).get("image_key")
+                if key and key not in images:
+                    images[key] = self.storage.get(key)
+            view["_images"] = images
             docx, pdf = self.renderer(head, view, self.soffice)
             prefix = f"quotes/{view['id']}/v{view['version']}/{token}"
             docx_key, pdf_key = prefix + ".docx", prefix + ".pdf"
