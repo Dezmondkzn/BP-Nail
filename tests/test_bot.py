@@ -33,7 +33,7 @@ def test_telegram_text_flow_and_forbidden_user(service, tmp_path):
         await ui.dp.feed_update(bot, update)
 
     async def flow():
-        await send(2, 100, "/new клиент=ООО A&B; позиции=A:1; поставка=10 дней; до=2026-11-05")
+        await send(2, 100, "/new клиент=ООО A&B; позиции=A:1:8350000; поставка=10 дней; до=2026-11-05")
         q = service.list_quotes(2)[0]["id"]
         await send(2, 101, f"/finish {q} 1")
         assert service.view(2, q)["status"] == "finished"
@@ -87,7 +87,7 @@ def test_product_choice_preserves_request_and_rejects_stale_buttons(service, tmp
         ).as_(bot)
         await ui.submit(
             message,
-            "клиент=Заря; позиции=Трактоор 100:2,Бункер 401:3; поставка=10 дней; до=2026-12-01",
+            "клиент=Заря; позиции=Трактоор 100:2:1000000,Бункер 401:3:8350000; поставка=10 дней; до=2026-12-01",
             "search-test",
             None,
         )
@@ -147,3 +147,37 @@ def test_voice_configuration_inflections():
     for wrong in (query.replace("301", "401"), query.replace("с тентовой", "без тентовой"), "с и со"):
         with pytest.raises(BusinessError, match="не найдена"):
             match_product([p], wrong)
+
+
+def test_missing_prices_are_requested_sequentially_without_losing_quote(service, tmp_path):
+    from aiogram.types import Message
+
+    settings = Settings(
+        bot_token="123456:TEST", database_url="sqlite://", app_env="development", storage_backend="local"
+    )
+    bot = Bot("123456:TEST")
+    bot.session = AsyncMock()
+    ui = UI(bot, service, AI(settings), LocalStorage(tmp_path), settings)
+
+    async def flow():
+        message = Message.model_validate(
+            {"message_id": 70, "date": 1793275200, "chat": {"id": 2, "type": "private"}}
+        ).as_(bot)
+        await ui.submit(
+            message, "клиент=Заря; позиции=A:2,B:3; поставка=10 дней; до=2026-12-01", "prices", None
+        )
+        assert service.list_quotes(2) == []
+        assert ui.state(2)["mode"] == "price"
+        await ui.submit(message, "2,73 млн", "reply1", ui.state(2))
+        assert ui.state(2)["index"] == 1
+        assert service.list_quotes(2) == []
+        await ui.submit(message, "100 000 руб.", "reply2", ui.state(2))
+        q = service.list_quotes(2)[0]["id"]
+        p = service.view(2, q)["payload"]
+        assert p["client"] == "Заря"
+        assert [i["unit_price"] for i in p["items"]] == ["2730000.00", "100000.00"]
+        assert [i["quantity"] for i in p["items"]] == [2, 3]
+        assert p["totals"]["gross"] == "5760000.00"
+        assert ui.state(2) is None
+
+    asyncio.run(flow())
