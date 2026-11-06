@@ -32,12 +32,11 @@ def test_cbr_failure_does_not_use_fake_rate():
         cbr.rate("EUR", date(2026, 10, 29))
 
 
-def test_structured_input_never_accepts_prices():
+def test_structured_input_accepts_manager_prices():
     p = parse_fields("клиент=ООО A&B; позиции=A:2,B:1; поставка=10 дней; до=2026-11-05")
     assert p.items[0].quantity == 2
     assert p.client == "ООО A&B"
-    with pytest.raises(BusinessError):
-        parse_fields("клиент=Заря; цена=1")
+    assert parse_fields("клиент=Заря; цена=1").unit_price == 1
 
 
 def test_ai_without_key_has_useful_fallback():

@@ -10,7 +10,13 @@ from .domain import ProposalPatch, BusinessError
 # Deterministic mode for operation/testing without an AI key.
 # Unknown keys fail closed; pricing/roles can never enter the domain through this path.
 def parse_fields(text):
-    aliases = {"клиент": "client", "позиции": "items", "поставка": "delivery_terms", "до": "valid_until"}
+    aliases = {
+        "клиент": "client",
+        "позиции": "items",
+        "поставка": "delivery_terms",
+        "до": "valid_until",
+        "цена": "unit_price",
+    }
     values = {}
     for segment in text.split(";"):
         if not segment.strip():
@@ -22,13 +28,20 @@ def parse_fields(text):
         key, val = segment.split("=", 1)
         key = aliases.get(key.strip().lower())
         if not key or key in values:
-            raise BusinessError("Неизвестное или повторное поле. Разрешены: клиент, позиции, поставка, до.")
+            raise BusinessError(
+                "Неизвестное или повторное поле. Разрешены: клиент, позиции, цена, поставка, до."
+            )
         val = val.strip()
         if key == "items":
             items = []
             for part in val.split(","):
-                sku, quantity = part.strip().rsplit(":", 1)
-                items.append({"product_query": sku, "quantity": int(quantity)})
+                fields = part.strip().split(":")
+                if len(fields) not in (2, 3):
+                    raise BusinessError("Позиция: SKU:количество[:цена за единицу в рублях с НДС].")
+                item = {"product_query": fields[0], "quantity": int(fields[1])}
+                if len(fields) == 3:
+                    item["unit_price"] = fields[2]
+                items.append(item)
             values[key] = items
         else:
             values[key] = val
@@ -44,7 +57,7 @@ class AI:
     async def parse(self, text, today: date):
         if len(text) > 6000:
             raise BusinessError("Запрос слишком длинный (до 6000 символов).")
-        if re.match(r"\s*(клиент|позиции|поставка|до)\s*=", text, re.I):
+        if re.match(r"\s*(клиент|позиции|цена|поставка|до)\s*=", text, re.I):
             return parse_fields(text).safe()
         if not self.client or not self.settings.openai_text_model:
             raise BusinessError(
@@ -60,7 +73,13 @@ class AI:
             "items заменяет весь список позиций. product_query сохраняет точное название/комплектацию или SKU. "
             "valid_until — конечная дата предложения ISO. delivery_terms — срок в форме N рабочих дней "
             "или N календарных дней, от 1 до 730. Если дана только дата, оставь null для уточнения. "
-            "не стоимость/доставка/гарантия. Запросы изменить цену, скидку, НДС, оплату, "
+            "не доставка/гарантия. Цена разрешена: unit_price — явно названная менеджером цена "
+            "за единицу в рублях с НДС. Миллионы и тысячи преобразуй в рубли. "
+            "Не выводи цену из каталога или общей суммы: если цена за единицу неясна, null. "
+            "Для каждой позиции передавай items[].unit_price. Для правки цены единственной "
+            "позиции без замены состава используй верхнеуровневый unit_price. "
+            "Если указана другая валюта или цена без НДС, не пересчитывай: unit_price=null для уточнения. "
+            "Запросы изменить скидку, НДС, оплату, "
             "реквизиты продавца, менеджера, роль или типовые условия перечисли в forbidden_requests; "
             "не маскируй их под другое поле. Даже начальник меняет НДС только отдельной командой. "
             "Для запроса правки передавай только явно названные поля."

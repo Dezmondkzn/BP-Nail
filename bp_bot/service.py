@@ -136,31 +136,24 @@ class Quotes:
 
     def _items(self, s, requested):
         products = list(s.scalars(select(Product).where(Product.active.is_(True))))
-        output, rates = [], {}
+        output = []
         for i in requested:
             p = match_product(products, i.product_query)
-            if date.fromisoformat(p.valid_until) < self.today():
-                raise BusinessError(f"Цена {p.sku} просрочена. Начальник должен обновить каталог.")
-            if p.currency not in rates:
-                rates[p.currency] = self.rates.rate(p.currency, self.today())
-            rate, rate_date = rates[p.currency]
-            unit = money(Decimal(str(p.price)) * rate)
+            unit = money(i.unit_price) if i.unit_price is not None else None
+            profile = s.get(AppValue, "product_profile:" + p.sku)
             output.append(
                 {
                     "sku": p.sku,
                     "name": p.name,
                     "configuration": p.configuration,
                     "quantity": i.quantity,
-                    "source_price": str(p.price),
-                    "currency": p.currency,
-                    "price_date": p.price_date,
-                    "price_valid_until": p.valid_until,
+                    "currency": "RUB",
                     "supply": p.supply,
-                    "rate": str(rate),
-                    "rate_date": rate_date.isoformat(),
-                    "unit_price": str(unit),
-                    "line_total": str(money(unit * i.quantity)),
+                    "unit_price": str(unit) if unit is not None else None,
+                    "line_total": str(money(unit * i.quantity)) if unit is not None else None,
                     "vat_rate": str(p.vat_rate),
+                    "pricing_source": "manager" if unit is not None else None,
+                    "profile": deepcopy(profile.value) if profile else {},
                 }
             )
         return output
@@ -175,6 +168,20 @@ class Quotes:
             if not patch.items:
                 raise BusinessError("Укажите хотя бы одну позицию.")
             data["items"] = self._items(s, patch.items)
+        if patch.unit_price is not None:
+            if len(data.get("items", [])) != 1:
+                raise BusinessError(
+                    "Для нескольких позиций задайте цену каждой: позиции=SKU:количество:цена."
+                )
+            item = data["items"][0]
+            unit = money(patch.unit_price)
+            item.update(
+                unit_price=str(unit),
+                line_total=str(money(unit * item["quantity"])),
+                currency="RUB",
+                pricing_source="manager",
+            )
+        data["template_version"] = "2"
         if data.get("valid_until") and date.fromisoformat(data["valid_until"]) < self.today():
             raise BusinessError("Срок предложения не может быть в прошлом.")
         data["totals"] = totals(data.get("items", []))
@@ -200,7 +207,7 @@ class Quotes:
                         "prepayment": 100,
                         "collection": "Самовывоз. Доставка в стоимость не включена.",
                         "letterhead_key": letterhead.value["key"] if letterhead else None,
-                        "template_version": "1",
+                        "template_version": "2",
                     },
                     patch,
                 )
@@ -341,8 +348,6 @@ class Quotes:
             gaps = missing(v.payload, self.today())
             if gaps:
                 raise BusinessError("Нужно заполнить: " + "; ".join(gaps))
-            if any(date.fromisoformat(i["price_valid_until"]) < self.today() for i in v.payload["items"]):
-                raise BusinessError("Срок цены истёк. Обновите каталог и позиции новой версии.")
             v.status, v.finished_by, v.finished_at = "finished", uid, now()
             s.add(Audit(actor_id=uid, action="finish", quote_id=qid, details={"version": number}))
 

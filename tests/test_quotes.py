@@ -10,7 +10,7 @@ from bp_bot.models import Version, Audit, Job
 def patch(**changes):
     data = {
         "client": "ООО «Заря»",
-        "items": [ItemInput(product_query="A", quantity=1)],
+        "items": [ItemInput(product_query="A", quantity=1, unit_price=8350000)],
         "delivery_terms": "10 рабочих дней",
         "valid_until": date(2026, 11, 5),
     }
@@ -74,13 +74,17 @@ def test_ambiguous_product_fails_closed(service):
 
 
 def test_currency_snapshot_does_not_reprice_existing_version(service):
-    q = service.create(2, patch(items=[ItemInput(product_query="B", quantity=2)]), "a")["id"]
+    q = service.create(2, patch(items=[ItemInput(product_query="B", quantity=2, unit_price=1000000)]), "a")[
+        "id"
+    ]
     service.rates.rate = lambda *_: (Decimal("200"), date(2026, 10, 30))
     service.revise(2, q, 1, ProposalPatch(client="Другой"), "b")
     assert service.view(2, q)["payload"]["totals"]["gross"] == "2000000.00"
-    service.revise(2, q, 2, ProposalPatch(items=[ItemInput(product_query="B", quantity=2)]), "c")
-    assert service.view(2, q)["payload"]["totals"]["gross"] == "4000000.00"
-    assert service.view(2, q, 1)["payload"]["items"][0]["rate"] == "100"
+    service.revise(
+        2, q, 2, ProposalPatch(items=[ItemInput(product_query="B", quantity=2, unit_price=1000000)]), "c"
+    )
+    assert service.view(2, q)["payload"]["totals"]["gross"] == "2000000.00"
+    assert service.view(2, q, 1)["payload"]["items"][0]["pricing_source"] == "manager"
 
 
 def test_idempotency_and_stale_version(service):
@@ -117,8 +121,7 @@ def test_missing_fields_and_expired_quote(service):
     service.today = lambda: date(2027, 1, 1)
     with pytest.raises(BusinessError):
         service.finish(2, q, 1)
-    with pytest.raises(BusinessError, match="просрочена"):
-        service.create(2, patch(valid_until=date(2027, 1, 5)), "c")
+    assert service.create(2, patch(valid_until=date(2027, 1, 5)), "c")
 
 
 def test_bootstrap_does_not_reenable_account(service):
@@ -160,9 +163,9 @@ def test_delivery_field_cannot_override_payment_or_price(service):
     assert service.view(2, q)["payload"]["delivery_terms"] == "В течение 10 рабочих дней после полной оплаты."
 
 
-
 def test_manager_completes_existing_draft_after_letterhead_upload(service):
     from bp_bot.models import AppValue
+
     with service.sessions.begin() as s:
         s.delete(s.get(AppValue, "letterhead"))
     q = service.create(2, patch(), "no-head")["id"]
@@ -176,3 +179,35 @@ def test_manager_completes_existing_draft_after_letterhead_upload(service):
     assert service.view(2, q)["payload"]["letterhead_key"] == "letterheads/manager.docx"
     with pytest.raises(BusinessError):
         service.set_letterhead(999, "letterheads/bad.docx")
+
+
+def test_manual_price_required_and_never_inferred_from_catalog(service):
+    from bp_bot.models import Product
+
+    service.rates.rate = lambda *_: (_ for _ in ()).throw(AssertionError("FX must not be called"))
+    with service.sessions.begin() as s:
+        s.get(Product, "A").price = None
+        s.get(Product, "A").valid_until = None
+    q = service.create(2, patch(items=[ItemInput(product_query="A", quantity=2)]), "unpriced")["id"]
+    assert service.view(2, q)["payload"]["totals"]["gross"] is None
+    with pytest.raises(BusinessError, match="цена"):
+        service.finish(2, q, 1)
+    service.revise(2, q, 1, ProposalPatch(unit_price=12345), "priced")
+    assert service.view(2, q)["payload"]["totals"]["gross"] == "24690.00"
+    service.finish(2, q, 2)
+    assert service.request_files(2, q, 2)["state"] == "queued"
+    assert service.view(2, q, 1)["payload"]["items"][0]["unit_price"] is None
+
+
+def test_price_validation():
+    from pydantic import ValidationError
+    from bp_bot.pricing import parse_price
+
+    assert parse_price("2,73 млн") == 2730000
+    assert parse_price("2 730 000 руб. с НДС") == 2730000
+    for value in ("0", "-1", "100 евро", "100 без НДС", "NaN"):
+        with pytest.raises(BusinessError):
+            parse_price(value)
+    for value in (0, -1, "NaN", "Infinity", "1.001"):
+        with pytest.raises(ValidationError):
+            ItemInput(product_query="A", quantity=1, unit_price=value)

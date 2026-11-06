@@ -32,10 +32,12 @@ class ItemInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     product_query: str = Field(min_length=1, max_length=300)
     quantity: int = Field(ge=1, le=1000, strict=True)
+    unit_price: Decimal | None = Field(default=None, gt=0, le=Decimal("999999999999.99"), decimal_places=2)
 
 
 class ProposalPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    unit_price: Decimal | None = Field(default=None, gt=0, le=Decimal("999999999999.99"), decimal_places=2)
     client: str | None = Field(default=None, max_length=300)
     items: list[ItemInput] | None = Field(default=None, max_length=20)
     delivery_terms: str | None = Field(default=None, max_length=500)
@@ -45,7 +47,7 @@ class ProposalPatch(BaseModel):
     def safe(self):
         if self.forbidden_requests:
             raise BusinessError(
-                "В MVP нельзя менять цену, скидки, оплату, менеджера и типовые условия. "
+                "Нельзя менять скидки, оплату, менеджера и типовые условия. "
                 "НДС меняет только начальник отдельной командой /vat."
             )
         if self.delivery_terms is not None:
@@ -70,6 +72,8 @@ def money(value):
 
 
 def totals(items):
+    if any(i.get("unit_price") is None or i.get("line_total") is None for i in items):
+        return {"gross": None, "vat": None, "net": None}
     gross = sum((Decimal(i["line_total"]) for i in items), Decimal(0))
     vat = sum(
         (
@@ -87,6 +91,9 @@ def missing(payload, today):
         fields.append("клиент")
     if not payload.get("items"):
         fields.append("техника и количество (выберите SKU из /catalog)")
+    for item in payload.get("items", []):
+        if item.get("unit_price") is None or item.get("pricing_source") != "manager":
+            fields.append(f"цена за единицу в рублях с НДС: {item['name']}")
     if not payload.get("delivery_terms", "").strip():
         fields.append("срок поставки")
     if not payload.get("valid_until"):

@@ -3,7 +3,7 @@ import io
 import re
 from datetime import date
 from decimal import Decimal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .domain import BusinessError
 
 
@@ -12,13 +12,18 @@ class CatalogRow(BaseModel):
     sku: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
     name: str = Field(min_length=1, max_length=300)
     configuration: str = Field(min_length=1, max_length=3000)
-    price: Decimal = Field(gt=0, le=Decimal("999999999999.99"), decimal_places=2)
+    price: Decimal | None = Field(default=None, gt=0, le=Decimal("999999999999.99"), decimal_places=2)
     currency: str = Field(pattern=r"^(RUB|EUR|USD|CNY)$")
-    supply: str = Field(pattern=r"^(stock|paid|order)$")
-    price_date: date
-    valid_until: date
+    supply: str = Field(default="unknown", pattern=r"^(stock|paid|order|unknown)$")
+    price_date: date | None = None
+    valid_until: date | None = None
     vat_rate: Decimal = Field(default=Decimal(22), ge=0, le=100, decimal_places=2)
     active: bool = True
+
+    @field_validator("price", "price_date", "valid_until", mode="before")
+    @classmethod
+    def empty_optional(cls, value):
+        return None if value == "" else value
 
 
 def parse_catalog(raw: bytes):
@@ -34,7 +39,7 @@ def parse_catalog(raw: bytes):
         for r in rows:
             if r.supply in {"stock", "paid"} and r.currency != "RUB":
                 raise ValueError()
-            if r.price_date > r.valid_until:
+            if r.price_date and r.valid_until and r.price_date > r.valid_until:
                 raise ValueError()
         return rows
     except (ValueError, UnicodeError):
