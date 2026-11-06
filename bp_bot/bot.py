@@ -180,7 +180,7 @@ class UI:
                 keyboard = []
                 for n, p in enumerate(choice.products):
                     lines.append(
-                        f"{n + 1}. {p.name} — {p.configuration[:240]}\n{p.price} {p.currency}; {p.sku}"
+                        f"{n + 1}. {p.name} — {p.configuration[:240]}\n{p.sku}; цену указывает менеджер"
                     )
                     keyboard.append(
                         [
