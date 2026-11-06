@@ -32,8 +32,9 @@ HELP = """АТехника — коммерческие предложения
 /cancel — отменить ввод
 
 Без AI можно заполнить так:
-клиент=ООО Заря; позиции=SKU:1; поставка=10 рабочих дней; до=2026-12-01
-Несколько позиций: позиции=SKU1:1,SKU2:2
+клиент=ООО Заря; позиции=SKU:1:2730000; поставка=10 рабочих дней; до=2026-12-01
+Несколько позиций: позиции=SKU1:1:2730000,SKU2:2:150000
+Цена за единицу в рублях с НДС обязательна; можно указать цена=2730000 для одной позиции.
 
 КП можно подготовить и завершить самостоятельно, без согласования.
 Общий бланк используется автоматически. Чтобы загрузить или заменить его,
@@ -73,11 +74,11 @@ def format_view(v):
     ]
     for i in p["items"]:
         lines.append(
-            f"{i['sku']} · {i['name']} · {i['quantity']} шт. × {i['unit_price']} ₽ "
-            f"= {i['line_total']} ₽; НДС {i['vat_rate']}% включён"
+            f"{i['sku']} · {i['name']} · {i['quantity']} шт. × {i['unit_price'] or 'цена не указана'} ₽ "
+            f"= {i['line_total'] or 'не определена'} ₽; НДС {i['vat_rate']}% включён"
         )
     lines += [
-        f"Итого: {p['totals']['gross']} ₽; в т. ч. НДС {p['totals']['vat']} ₽",
+        f"Итого: {p['totals']['gross'] or 'не определено'} ₽; в т. ч. НДС {p['totals']['vat'] or 'не определён'} ₽",
         "Оплата: 100% предоплата",
         f"Поставка: {p.get('delivery_terms') or 'не указана'}",
         p["collection"],
@@ -138,6 +139,13 @@ class UI:
             )
 
     async def submit(self, message, text, key, state):
+        if state and state.get("mode") == "price":
+            from .pricing import parse_price
+
+            patch = ProposalPatch.model_validate(state["patch"])
+            patch.items[state["index"]].unit_price = parse_price(text)
+            await self.submit_patch(message, patch, state["request_key"], state["target"])
+            return
         patch = await self.ai.parse(text, self.quotes.today())
         if not patch.model_dump(exclude_none=True, exclude={"forbidden_requests"}):
             raise BusinessError(
@@ -147,6 +155,8 @@ class UI:
 
     async def submit_patch(self, message, patch, key, state):
         uid = message.chat.id
+        if patch.unit_price is not None and patch.items and len(patch.items) == 1:
+            patch.items[0].unit_price = patch.unit_price
         for index, item in enumerate(patch.items or []):
             try:
                 product = await asyncio.to_thread(self.quotes.resolve_product, uid, item.product_query)
@@ -181,6 +191,26 @@ class UI:
                     )
                 keyboard.append([InlineKeyboardButton(text="Отменить", callback_data="cancel")])
                 await self.send(message, "\n\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard))
+                return
+        for index, item in enumerate(patch.items or []):
+            if item.unit_price is None:
+                product = await asyncio.to_thread(self.quotes.resolve_product, uid, item.product_query)
+                await asyncio.to_thread(
+                    self.state,
+                    uid,
+                    {
+                        "mode": "price",
+                        "patch": patch.model_dump(mode="json"),
+                        "index": index,
+                        "request_key": key,
+                        "target": state,
+                    },
+                )
+                await message.answer(
+                    f"Какую цену за единицу указать для «{product.name}» ({item.quantity} шт.)? "
+                    "Напишите сумму в рублях с НДС, например 2730000 или 2,73 млн. "
+                    "Отменить ввод: /cancel."
+                )
                 return
         if state and state.get("mode") == "edit":
             result = await asyncio.to_thread(
@@ -258,7 +288,7 @@ class UI:
                         {
                             "mode": "voice",
                             "text": text,
-                            "target": state if state and state.get("mode") == "edit" else None,
+                            "target": state if state and state.get("mode") in {"edit", "price"} else None,
                             "request_key": request_key,
                             "token": token,
                         },
@@ -293,7 +323,7 @@ class UI:
                     else:
                         await m.answer(
                             "Напишите клиента, технику с количеством и сроки либо отправьте голосовое.\n"
-                            "Пример: клиент=ООО Заря; позиции=SKU:1; поставка=10 рабочих дней; до=2026-12-01"
+                            "Пример: клиент=ООО Заря; позиции=SKU:1:2730000; поставка=10 рабочих дней; до=2026-12-01"
                         )
                 elif command == "/catalog":
                     rows = await asyncio.to_thread(self.quotes.catalog, uid, " ".join(parts[1:]))
@@ -301,8 +331,7 @@ class UI:
                         m,
                         "\n\n".join(
                             f"{p.sku}: {p.name}\n{p.configuration}\n"
-                            f"{p.price} {p.currency}, НДС {p.vat_rate}% включён; "
-                            f"цена до {p.valid_until}"
+                            "Цену за единицу в рублях с НДС указывает менеджер."
                             for p in rows
                         )
                         or "Каталог пуст. Начальник должен загрузить CSV.",
