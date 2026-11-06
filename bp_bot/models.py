@@ -38,11 +38,11 @@ class Product(Base):
     sku: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(300))
     configuration: Mapped[str] = mapped_column(Text)
-    price: Mapped[float] = mapped_column(Numeric(18, 2))
+    price: Mapped[float | None] = mapped_column(Numeric(18, 2))
     currency: Mapped[str] = mapped_column(String(3))
     supply: Mapped[str] = mapped_column(String(20))  # stock, paid, order
-    price_date: Mapped[str] = mapped_column(String(10))
-    valid_until: Mapped[str] = mapped_column(String(10))
+    price_date: Mapped[str | None] = mapped_column(String(10))
+    valid_until: Mapped[str | None] = mapped_column(String(10))
     vat_rate: Mapped[float] = mapped_column(Numeric(5, 2), default=22)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
