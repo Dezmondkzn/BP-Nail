@@ -124,7 +124,14 @@ def word_similarity(left, right):
 def search_products(products, query):
 
     products = [p for p in products if p.active]
-    query = query.strip()
+    # Extraction may retain a field label ("модель GRITAN ..."). Strip only
+    # leading labels, never model numbers or configuration requirements.
+    query = re.sub(
+        r"^(?:(?:модель|марка|техника|оборудование)(?:\s*[:=]\s*|\s+))+",
+        "",
+        query.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
     exact = [p for p in products if p.sku.casefold() == query.casefold()]
     if exact:
         return exact, True
