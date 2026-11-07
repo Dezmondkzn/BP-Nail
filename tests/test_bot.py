@@ -168,7 +168,7 @@ def test_missing_prices_are_requested_sequentially_without_losing_quote(service,
         )
         assert service.list_quotes(2) == []
         assert ui.state(2)["mode"] == "price"
-        await ui.submit(message, "2,73 млн", "reply1", ui.state(2))
+        await ui.submit(message, "2,73 млн.", "reply1", ui.state(2))
         assert ui.state(2)["index"] == 1
         assert service.list_quotes(2) == []
         await ui.submit(message, "100 000 руб.", "reply2", ui.state(2))
