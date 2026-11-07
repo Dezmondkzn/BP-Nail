@@ -10,6 +10,18 @@ from docx.oxml.ns import qn
 from .domain import BusinessError
 from .documents import rub
 from datetime import date
+from PIL import Image, ImageOps
+
+
+def word_photo(raw):
+    """Encode catalog photos as PNG; python-docx cannot embed WebP/AVIF."""
+    output = io.BytesIO()
+    with Image.open(io.BytesIO(raw)) as source:
+        image = ImageOps.exif_transpose(source)
+        mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
+        image.convert(mode).save(output, format="PNG")
+    output.seek(0)
+    return output
 
 
 def table(document, rows, widths):
@@ -91,7 +103,7 @@ def build_proposal(letterhead, view, target):
         image_key = profile.get("image_key")
         photo = view.get("_images", {}).get(image_key)
         if photo:
-            d.add_paragraph().add_run().add_picture(io.BytesIO(photo), width=Cm(16.5))
+            d.add_paragraph().add_run().add_picture(word_photo(photo), width=Cm(16.5))
         if profile.get("specifications"):
             d.add_page_break()
             d.add_paragraph("Краткая спецификация", "Heading 1")
