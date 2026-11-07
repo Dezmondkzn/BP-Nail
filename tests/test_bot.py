@@ -181,3 +181,76 @@ def test_missing_prices_are_requested_sequentially_without_losing_quote(service,
         assert ui.state(2) is None
 
     asyncio.run(flow())
+
+
+def test_voice_parse_failure_allows_text_correction_and_preserves_edit(service, tmp_path):
+    from bp_bot.domain import ProposalPatch
+    from test_ai_recovery import configured_ai, invalid_response
+
+    settings = Settings(
+        bot_token="123456:TEST", database_url="sqlite://", app_env="development", storage_backend="local"
+    )
+    bot = Bot("123456:TEST")
+    bot.session = AsyncMock()
+    ai, _ = configured_ai([invalid_response(), invalid_response()])
+    ui = UI(bot, service, ai, LocalStorage(tmp_path), settings)
+    qid = service.create(2, ProposalPatch(client="Было"), "voice-original")["id"]
+    target = {"mode": "edit", "id": qid, "version": 1}
+    ui.state(
+        2,
+        {
+            "mode": "voice",
+            "text": "Исправь клиента",
+            "token": "test",
+            "request_key": "voice:2:50",
+            "target": target,
+        },
+    )
+
+    async def flow():
+        await ui.dp.feed_update(
+            bot,
+            Update.model_validate(
+                {
+                    "update_id": 500,
+                    "callback_query": {
+                        "id": "500",
+                        "chat_instance": "test",
+                        "data": "voice:test",
+                        "from": {"id": 2, "is_bot": False, "first_name": "Test"},
+                        "message": {
+                            "message_id": 99,
+                            "date": 1793275200,
+                            "chat": {"id": 2, "type": "private"},
+                            "from": {"id": 123456, "is_bot": True, "first_name": "Bot"},
+                            "text": "Проверьте распознанный текст",
+                        },
+                    },
+                }
+            ),
+        )
+        assert "пришлите исправленный запрос текстом" in bot.session.call_args.args[1].text
+        assert ui.state(2)["text"] == "Исправь клиента"
+        assert ui.state(2)["target"] == target
+        assert service.view(2, qid)["version"] == 1
+        await ui.dp.feed_update(
+            bot,
+            Update.model_validate(
+                {
+                    "update_id": 501,
+                    "message": {
+                        "message_id": 501,
+                        "date": 1793275200,
+                        "chat": {"id": 2, "type": "private"},
+                        "from": {"id": 2, "is_bot": False, "first_name": "Test"},
+                        "text": "клиент=Заря",
+                    },
+                }
+            ),
+        )
+        assert service.view(2, qid)["version"] == 2
+        assert service.view(2, qid)["payload"]["client"] == "Заря"
+        assert len(service.list_quotes(2)) == 1
+        assert ui.state(2) is None
+
+    asyncio.run(flow())

@@ -1,10 +1,20 @@
 import re
+import logging
 import subprocess
 import tempfile
 from pathlib import Path
 from datetime import date
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 from .domain import ProposalPatch, BusinessError
+
+log = logging.getLogger(__name__)
+PARSE_ERROR = (
+    "Не удалось разобрать текст запроса в поля КП. "
+    "Проверьте клиента, количество, цену и даты и пришлите исправленный запрос текстом. "
+    "Например: клиент=ООО Заря; позиции=SKU:1:2730000; "
+    "поставка=10 рабочих дней; до=2026-12-01."
+)
 
 
 # Deterministic mode for operation/testing without an AI key.
@@ -84,16 +94,38 @@ class AI:
             "не маскируй их под другое поле. Даже начальник меняет НДС только отдельной командой. "
             "Для запроса правки передавай только явно названные поля."
         )
-        result = await self.client.responses.parse(
-            model=self.settings.openai_text_model,
-            instructions=instructions,
-            input=text,
-            text_format=ProposalPatch,
-            max_output_tokens=1800,
-        )
-        if not result.output_parsed:
-            raise BusinessError("Не удалось разобрать запрос. Переформулируйте или используйте поля с =.")
-        return result.output_parsed.safe()
+        repair = ""
+        for attempt, budget in enumerate((1800, 3600), start=1):
+            try:
+                result = await self.client.responses.parse(
+                    model=self.settings.openai_text_model,
+                    instructions=instructions + repair,
+                    input=text,
+                    text_format=ProposalPatch,
+                    max_output_tokens=budget,
+                )
+            except ValidationError as error:
+                # Never log the exception text: it includes the customer's input values.
+                errors = error.errors(include_input=False, include_context=False, include_url=False)
+                issues = sorted({(str(e["loc"][0]) if e["loc"] else "response", e["type"]) for e in errors})
+                log.warning("proposal_parse_validation attempt=%s issues=%s", attempt, issues)
+                repair = (
+                    " Предыдущий ответ не прошёл проверку формата. Верни полный JSON по схеме. "
+                    "Количество — целое число 1–1000; цена — положительное число рублей, "
+                    "не более двух знаков после точки; дата — ГГГГ-ММ-ДД. "
+                    "Если значение неясно, оставь необязательное поле null. Не выдумывай значения."
+                )
+                continue
+            if result.status == "incomplete":
+                reason = result.incomplete_details.reason if result.incomplete_details else "unknown"
+                log.warning("proposal_parse_incomplete attempt=%s reason=%s", attempt, reason)
+                if reason == "max_output_tokens":
+                    continue
+                raise BusinessError(PARSE_ERROR)
+            if not result.output_parsed:
+                raise BusinessError(PARSE_ERROR)
+            return result.output_parsed.safe()
+        raise BusinessError(PARSE_ERROR)
 
     async def transcribe(self, raw, prompt=""):
         if not self.client or not self.settings.openai_transcribe_model:

@@ -423,6 +423,8 @@ class UI:
                         raise BusinessError("Выберите технику кнопкой или отмените ввод /cancel.")
                     if state and state.get("mode") == "voice":
                         raise BusinessError("Подтвердите голосовое кнопкой или отмените ввод /cancel.")
+                    if state and state.get("mode") == "voice_retry":
+                        state = state["target"]
                     await self.submit(m, text, request_key, state)
             except BusinessError as e:
                 await self.send(m, str(e))
@@ -459,7 +461,15 @@ class UI:
                     st = await asyncio.to_thread(self.state, uid)
                     if not st or st.get("mode") != "voice" or st.get("token") != data[1]:
                         raise BusinessError("Этот запрос уже обработан или отменён.")
-                    await self.submit(c.message, st["text"], st["request_key"], st["target"])
+                    try:
+                        await self.submit(c.message, st["text"], st["request_key"], st["target"])
+                    except BusinessError:
+                        # Keep the transcript and edit/price target, but allow a corrected
+                        # text request instead of trapping the user at the voice buttons.
+                        current = await asyncio.to_thread(self.state, uid)
+                        if current and current.get("mode") == "voice" and current.get("token") == data[1]:
+                            await asyncio.to_thread(self.state, uid, {**st, "mode": "voice_retry"})
+                        raise
                 else:
                     qid, ver = int(data[1]), int(data[2])
                     await asyncio.to_thread(self.quotes.view, uid, qid, ver)
