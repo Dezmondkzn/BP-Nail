@@ -36,6 +36,7 @@ async def main():
     )
     store, ai = storage(settings), AI(settings)
     worker = Worker(sessions, store, settings.soffice_path)
+    await asyncio.to_thread(worker.log_recent_failures)
     stop = asyncio.Event()
     bot = Bot(settings.bot_token.get_secret_value())
     ui = UI(bot, quotes, ai, store, settings)
