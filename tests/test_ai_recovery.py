@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from pydantic import ValidationError
 
 from bp_bot.ai import AI
 from bp_bot.config import Settings
@@ -12,10 +11,7 @@ from bp_bot.domain import BusinessError, ProposalPatch
 
 
 def invalid_response():
-    try:
-        ProposalPatch.model_validate_json('{"client":"PRIVATE CUSTOMER",')
-    except ValidationError as error:
-        return error
+    return response(raw='{"client":"PRIVATE CUSTOMER",')
 
 
 def configured_ai(results):
@@ -28,14 +24,19 @@ def configured_ai(results):
     )
     ai = AI(settings)
     parse = AsyncMock(side_effect=results)
-    ai.client = SimpleNamespace(responses=SimpleNamespace(parse=parse))
+    ai.client = SimpleNamespace(responses=SimpleNamespace(create=parse))
     return ai, parse
 
 
-def response(patch=None, status="completed", reason=None):
+def response(patch=None, status="completed", reason=None, raw=None):
+    content = (
+        [SimpleNamespace(type="output_text", text=raw if raw is not None else patch.model_dump_json())]
+        if raw is not None or patch is not None
+        else [SimpleNamespace(type="refusal")]
+    )
     return SimpleNamespace(
         status=status,
-        output_parsed=patch,
+        output=[SimpleNamespace(type="message", content=content, phase=None)],
         incomplete_details=SimpleNamespace(reason=reason) if reason else None,
     )
 
@@ -75,3 +76,76 @@ def test_refusal_is_not_retried():
     with pytest.raises(BusinessError):
         asyncio.run(ai.parse("Сделай КП", date(2026, 11, 7)))
     assert parse.await_count == 1
+
+
+def test_final_json_ignores_non_json_commentary():
+    result = response(ProposalPatch(client="Заря"))
+    result.output[0].phase = "final_answer"
+    result.output.insert(
+        0,
+        SimpleNamespace(
+            type="message",
+            phase="commentary",
+            content=[SimpleNamespace(type="output_text", text="Подготовлю коммерческое предложение.")],
+        ),
+    )
+    ai, create = configured_ai([result])
+    assert asyncio.run(ai.parse("КП для Зари", date(2026, 11, 7))).client == "Заря"
+    assert create.await_count == 1
+
+
+def test_real_sdk_incomplete_json_is_checked_before_validation(caplog):
+    import json
+    import httpx
+    from openai import AsyncOpenAI
+
+    requests = []
+
+    def serve(request):
+        requests.append(json.loads(request.content))
+        incomplete = len(requests) == 1
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1794038400,
+                "model": "test-model",
+                "status": "incomplete" if incomplete else "completed",
+                "incomplete_details": {"reason": "max_output_tokens"} if incomplete else None,
+                "output": [
+                    {
+                        "id": "msg_test",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "incomplete" if incomplete else "completed",
+                        "phase": "final_answer",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "annotations": [],
+                                "text": '{"client":"PRIVATE CUSTOMER",'
+                                if incomplete
+                                else ProposalPatch(client="Заря").model_dump_json(),
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    async def flow():
+        ai, _ = configured_ai([])
+        async with AsyncOpenAI(
+            api_key="test-key", http_client=httpx.AsyncClient(transport=httpx.MockTransport(serve))
+        ) as client:
+            ai.client = client
+            return await ai.parse("КП для Зари", date(2026, 11, 7))
+
+    assert asyncio.run(flow()).client == "Заря"
+    assert len(requests) == 2
+    assert requests[1]["max_output_tokens"] == 12000
+    assert requests[0]["text"]["format"]["strict"] is True
+    assert "proposal_parse_incomplete" in caplog.text
+    assert "proposal_parse_validation" not in caplog.text
+    assert "PRIVATE CUSTOMER" not in caplog.text

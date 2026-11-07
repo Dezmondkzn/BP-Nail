@@ -17,6 +17,26 @@ PARSE_ERROR = (
 )
 
 
+def proposal_format():
+    """Build the strict API schema while keeping domain validation in Pydantic."""
+    schema = ProposalPatch.model_json_schema()
+
+    def strict(node):
+        if isinstance(node, dict):
+            node.pop("default", None)
+            if node.get("type") == "object":
+                node["additionalProperties"] = False
+                node["required"] = list(node.get("properties", {}))
+            for value in node.values():
+                strict(value)
+        elif isinstance(node, list):
+            for value in node:
+                strict(value)
+
+    strict(schema)
+    return {"type": "json_schema", "name": "ProposalPatch", "schema": schema, "strict": True}
+
+
 # Deterministic mode for operation/testing without an AI key.
 # Unknown keys fail closed; pricing/roles can never enter the domain through this path.
 def parse_fields(text):
@@ -95,15 +115,32 @@ class AI:
             "Для запроса правки передавай только явно названные поля."
         )
         repair = ""
-        for attempt, budget in enumerate((1800, 3600), start=1):
-            try:
-                result = await self.client.responses.parse(
-                    model=self.settings.openai_text_model,
-                    instructions=instructions + repair,
-                    input=text,
-                    text_format=ProposalPatch,
-                    max_output_tokens=budget,
+        for attempt, budget in enumerate((4000, 12000), start=1):
+            # The SDK's parse helper validates every text block before exposing
+            # status, including truncated JSON and non-final commentary.
+            result = await self.client.responses.create(
+                model=self.settings.openai_text_model,
+                instructions=instructions + repair,
+                input=text,
+                text={"format": proposal_format()},
+                max_output_tokens=budget,
+            )
+            if result.status != "completed":
+                reason = result.incomplete_details.reason if result.incomplete_details else "unknown"
+                log.warning(
+                    "proposal_parse_incomplete attempt=%s status=%s reason=%s", attempt, result.status, reason
                 )
+                if result.status == "incomplete" and reason == "max_output_tokens":
+                    continue
+                raise BusinessError(PARSE_ERROR)
+            messages = [item for item in result.output if item.type == "message"]
+            final = [item for item in messages if getattr(item, "phase", None) == "final_answer"]
+            candidates = final or [item for item in messages if getattr(item, "phase", None) is None]
+            if len(candidates) != 1 or any(c.type == "refusal" for c in candidates[0].content):
+                raise BusinessError(PARSE_ERROR)
+            raw = "".join(c.text for c in candidates[0].content if c.type == "output_text")
+            try:
+                patch = ProposalPatch.model_validate_json(raw)
             except ValidationError as error:
                 # Never log the exception text: it includes the customer's input values.
                 errors = error.errors(include_input=False, include_context=False, include_url=False)
@@ -116,15 +153,7 @@ class AI:
                     "Если значение неясно, оставь необязательное поле null. Не выдумывай значения."
                 )
                 continue
-            if result.status == "incomplete":
-                reason = result.incomplete_details.reason if result.incomplete_details else "unknown"
-                log.warning("proposal_parse_incomplete attempt=%s reason=%s", attempt, reason)
-                if reason == "max_output_tokens":
-                    continue
-                raise BusinessError(PARSE_ERROR)
-            if not result.output_parsed:
-                raise BusinessError(PARSE_ERROR)
-            return result.output_parsed.safe()
+            return patch.safe()
         raise BusinessError(PARSE_ERROR)
 
     async def transcribe(self, raw, prompt=""):
