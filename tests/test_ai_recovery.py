@@ -149,3 +149,46 @@ def test_real_sdk_incomplete_json_is_checked_before_validation(caplog):
     assert "proposal_parse_incomplete" in caplog.text
     assert "proposal_parse_validation" not in caplog.text
     assert "PRIVATE CUSTOMER" not in caplog.text
+
+
+def test_money_schema_avoids_decimal_decoding_constraints():
+    from bp_bot.ai import proposal_format
+
+    schema = proposal_format()["schema"]
+    for props in (schema["properties"], schema["$defs"]["ItemInput"]["properties"]):
+        assert props["unit_price"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert schema["$defs"]["ItemInput"]["properties"]["quantity"]["maximum"] == 1000
+
+
+@pytest.mark.parametrize("price", ["0", "-1", "NaN", "1.001", "1000000000000"])
+def test_simple_money_schema_keeps_domain_limits(price):
+    import json
+
+    invalid = response(
+        raw=json.dumps({"items": [{"product_query": "A", "quantity": 1, "unit_price": price}]})
+    )
+    ai, create = configured_ai([invalid, invalid])
+    with pytest.raises(BusinessError):
+        asyncio.run(ai.parse("Сделай КП", date(2026, 11, 7)))
+    assert create.await_count == 2
+
+
+def test_money_string_keeps_exact_price_and_safe_delivery_terms():
+    import json
+    from decimal import Decimal
+
+    result = response(
+        raw=json.dumps(
+            {
+                "client": "ООО Заря",
+                "items": [{"product_query": "Tomahawk 505M", "quantity": 1, "unit_price": "2730000.01"}],
+                "delivery_terms": "6 рабочих дней",
+                "valid_until": "2026-12-31",
+                "forbidden_requests": [],
+            }
+        )
+    )
+    ai, _ = configured_ai([result])
+    p = asyncio.run(ai.parse("Сделай КП", date(2026, 11, 7)))
+    assert p.items[0].unit_price == Decimal("2730000.01")
+    assert p.delivery_terms == "В течение 6 рабочих дней после полной оплаты."

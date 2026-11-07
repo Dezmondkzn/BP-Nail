@@ -34,6 +34,14 @@ def proposal_format():
                 strict(value)
 
     strict(schema)
+    # Decimal's generated regex/number union can dead-end constrained decoding
+    # on gpt-4o-mini. Send money as decimal text and enforce all monetary limits
+    # locally with ProposalPatch, without floating-point conversion.
+    for properties in (schema["properties"], schema["$defs"]["ItemInput"]["properties"]):
+        properties["unit_price"] = {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": "Цена за единицу в рублях с НДС: десятичная строка, например 2730000.00, либо null.",
+        }
     return {"type": "json_schema", "name": "ProposalPatch", "schema": schema, "strict": True}
 
 
