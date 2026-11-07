@@ -351,7 +351,7 @@ class Quotes:
             v.status, v.finished_by, v.finished_at = "finished", uid, now()
             s.add(Audit(actor_id=uid, action="finish", quote_id=qid, details={"version": number}))
 
-    def request_files(self, uid, qid, number):
+    def request_files(self, uid, qid, number, deliver=False):
         with self.sessions.begin() as s:
             q, v = self._get(s, uid, qid, number)
             if v.status != "finished":
@@ -363,4 +363,46 @@ class Quotes:
                 s.flush()
             elif job.state == "failed":
                 job.state, job.attempts, job.error = "queued", 0, None
+            if deliver:
+                key = f"file_delivery:{uid}:{qid}:{number}"
+                if not s.get(AppValue, key):
+                    s.add(
+                        AppValue(
+                            key=key,
+                            value={
+                                "uid": uid,
+                                "qid": qid,
+                                "version": number,
+                                "sent": [],
+                            },
+                        )
+                    )
             return {"state": job.state, "docx_key": job.docx_key, "pdf_key": job.pdf_key}
+
+    def pending_file_deliveries(self):
+        with self.sessions() as s:
+            return [
+                {"key": row.key, **row.value}
+                for row in s.scalars(
+                    select(AppValue).where(AppValue.key.startswith("file_delivery:")).order_by(AppValue.key)
+                )
+            ]
+
+    def file_delivery_status(self, delivery):
+        with self.sessions() as s:
+            _, version = self._get(s, delivery["uid"], delivery["qid"], delivery["version"])
+            job = s.scalar(select(Job).where(Job.version_id == version.id))
+            return {"state": job.state, "docx_key": job.docx_key, "pdf_key": job.pdf_key}
+
+    def acknowledge_file_delivery(self, key, extension=None):
+        with self.sessions.begin() as s:
+            row = s.get(AppValue, key)
+            if not row:
+                return
+            sent = set(row.value["sent"])
+            if extension:
+                sent.add(extension)
+            if extension is None or sent == {"docx", "pdf"}:
+                s.delete(row)
+            else:
+                row.value = {**row.value, "sent": sorted(sent)}

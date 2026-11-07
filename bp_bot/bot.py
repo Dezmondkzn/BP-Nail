@@ -5,6 +5,7 @@ import uuid
 from decimal import Decimal
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -123,20 +124,42 @@ class UI:
 
     async def files(self, message, qid, version):
         uid = message.chat.id
-        job = await asyncio.to_thread(self.quotes.request_files, uid, qid, version)
+        job = await asyncio.to_thread(self.quotes.request_files, uid, qid, version, deliver=True)
         if job["state"] != "done":
             await message.answer(
-                "Документы в очереди. Через несколько секунд нажмите «Word и PDF» ещё раз.",
-                reply_markup=buttons(qid, version),
+                "Документы в очереди. Через несколько секунд они выгрузятся сюда в формате «Word и PDF»"
             )
-            return
-        for extension in ("docx", "pdf"):
-            # Re-check authorization immediately before retrieval/delivery.
-            await asyncio.to_thread(self.quotes.view, uid, qid, version)
-            raw = await asyncio.to_thread(self.store.get, job[extension + "_key"])
-            await message.answer_document(
-                BufferedInputFile(raw, filename=f"KP-{qid:05d}_v{version}.{extension}")
-            )
+
+    async def deliver_pending_files(self):
+        for delivery in await asyncio.to_thread(self.quotes.pending_file_deliveries):
+            key, uid = delivery["key"], delivery["uid"]
+            try:
+                job = await asyncio.to_thread(self.quotes.file_delivery_status, delivery)
+                if job["state"] == "failed":
+                    await self.bot.send_message(
+                        uid,
+                        "Не удалось подготовить документы. Нажмите «Word и PDF», чтобы повторить подготовку.",
+                    )
+                    await asyncio.to_thread(self.quotes.acknowledge_file_delivery, key)
+                elif job["state"] == "done":
+                    for extension in ("docx", "pdf"):
+                        if extension in delivery["sent"]:
+                            continue
+                        # Check authorization again immediately before each delivery.
+                        await asyncio.to_thread(self.quotes.view, uid, delivery["qid"], delivery["version"])
+                        raw = await asyncio.to_thread(self.store.get, job[extension + "_key"])
+                        await self.bot.send_document(
+                            uid,
+                            BufferedInputFile(
+                                raw, filename=f"KP-{delivery['qid']:05d}_v{delivery['version']}.{extension}"
+                            ),
+                        )
+                        await asyncio.to_thread(self.quotes.acknowledge_file_delivery, key, extension)
+            except (BusinessError, TelegramForbiddenError):
+                await asyncio.to_thread(self.quotes.acknowledge_file_delivery, key)
+            except Exception as error:
+                # Keep pending delivery for retry, without logging customer data.
+                log.error("file_delivery_failure type=%s", type(error).__name__)
 
     async def submit(self, message, text, key, state):
         if state and state.get("mode") == "price":

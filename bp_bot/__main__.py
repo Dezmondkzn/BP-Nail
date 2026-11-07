@@ -28,12 +28,17 @@ async def main():
             raise RuntimeError("Another bot process is already running")
     quotes = Quotes(sessions, CBR(), settings.timezone)
     await asyncio.to_thread(
-        quotes.bootstrap, settings.bootstrap_admin_id, settings.bootstrap_admin_name,
-        settings.bootstrap_manager_id, settings.bootstrap_manager_name,
+        quotes.bootstrap,
+        settings.bootstrap_admin_id,
+        settings.bootstrap_admin_name,
+        settings.bootstrap_manager_id,
+        settings.bootstrap_manager_name,
     )
     store, ai = storage(settings), AI(settings)
     worker = Worker(sessions, store, settings.soffice_path)
     stop = asyncio.Event()
+    bot = Bot(settings.bot_token.get_secret_value())
+    ui = UI(bot, quotes, ai, store, settings)
 
     async def work():
         while not stop.is_set():
@@ -42,14 +47,17 @@ async def main():
             except Exception as e:
                 logging.error("worker_failure type=%s", type(e).__name__)
             try:
+                await ui.deliver_pending_files()
+            except Exception as e:
+                logging.error("delivery_worker_failure type=%s", type(e).__name__)
+            try:
                 await asyncio.wait_for(stop.wait(), timeout=2)
             except TimeoutError:
                 pass
 
     task = asyncio.create_task(work())
-    bot = Bot(settings.bot_token.get_secret_value())
     try:
-        await UI(bot, quotes, ai, store, settings).run()
+        await ui.run()
     finally:
         stop.set()
         await task
