@@ -33,6 +33,14 @@ class User(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class TelegramIdentity(Base):
+    __tablename__ = "telegram_identities"
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    username: Mapped[str | None] = mapped_column(String(32), unique=True, nullable=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class Product(Base):
     __tablename__ = "products"
     sku: Mapped[str] = mapped_column(String(64), primary_key=True)

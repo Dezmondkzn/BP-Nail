@@ -2,9 +2,10 @@ from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
+import re
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
-from .models import User, Product, Quote, Version, Audit, AppValue, RequestReceipt, Job, now
+from .models import User, TelegramIdentity, Product, Quote, Version, Audit, AppValue, RequestReceipt, Job, now
 from .domain import Role, BusinessError, authorize, money, totals, missing
 from .catalog import match_product, parse_catalog, search_products
 
@@ -23,6 +24,58 @@ class Quotes:
             user = s.get(User, uid)
             authorize(user)
             return user
+
+    def remember_telegram_identity(self, uid, username, display_name):
+        username = username.casefold() if username else None
+        with self.sessions.begin() as s:
+            if username:
+                # A recycled nickname must never retain its former owner's access.
+                s.execute(
+                    update(TelegramIdentity)
+                    .where(TelegramIdentity.username == username, TelegramIdentity.telegram_id != uid)
+                    .values(username=None)
+                )
+            identity = s.get(TelegramIdentity, uid)
+            if identity is None:
+                identity = TelegramIdentity(telegram_id=uid)
+                s.add(identity)
+            identity.username = username
+            identity.display_name = display_name.strip()[:120] or str(uid)
+            identity.seen_at = now()
+
+    def _resolve_user_reference(self, s, reference):
+        text = str(reference).strip()
+        if text.startswith("@"):
+            username = text[1:].casefold()
+            if not re.fullmatch(r"[a-z0-9_]{1,32}", username):
+                raise BusinessError("Укажите Telegram ID или @ник без пробелов и ссылок.")
+            identity = s.scalar(select(TelegramIdentity).where(TelegramIdentity.username == username))
+            if not identity:
+                raise BusinessError(
+                    "Ник боту неизвестен. Попросите пользователя отправить боту /start, затем повторите добавление или отключение."
+                )
+            return {"id": identity.telegram_id, "username": username, "name": identity.display_name}
+        if not text.isascii() or not text.isdecimal() or len(text) > 19 or not 0 < int(text) < 2**63:
+            raise BusinessError("Укажите положительный Telegram ID или @ник.")
+        return {"id": int(text), "username": None}
+
+    def resolve_user_reference(self, actor_id, reference):
+        with self.sessions() as s:
+            authorize(s.get(User, actor_id), chief=True)
+            return self._resolve_user_reference(s, reference)
+
+    def disable_user(self, actor_id, reference):
+        with self.sessions.begin() as s:
+            authorize(s.get(User, actor_id), chief=True)
+            target = self._resolve_user_reference(s, reference)
+            if target["id"] == actor_id:
+                raise BusinessError("Нельзя отключить самого себя.")
+            user = s.get(User, target["id"])
+            if user is None:
+                raise BusinessError("Пользователь ещё не добавлен.")
+            user.active = False
+            s.add(Audit(actor_id=actor_id, action="disable_user", details={"user": user.telegram_id}))
+            return target
 
     def bootstrap(self, uid, name, manager_id=0, manager_name="Менеджер"):
         if uid < 0 or manager_id < 0 or (manager_id and (not uid or manager_id == uid)):
@@ -45,13 +98,21 @@ class Quotes:
                         )
                 s.add(AppValue(key="bootstrap_done", value={"done": True}))
 
-    def set_user(self, actor_id, uid, role, department, name, active=True, create_only=False):
+    def set_user(
+        self, actor_id, uid, role, department, name, active=True, create_only=False, expected_username=None
+    ):
         if role not in set(Role) or uid <= 0 or not name.strip() or not department.strip():
             raise BusinessError("Проверьте ID, роль, отдел и имя.")
         if len(name) > 120 or len(department) > 80:
             raise BusinessError("Слишком длинное имя или отдел.")
         with self.sessions.begin() as s:
             authorize(s.get(User, actor_id), chief=True)
+            if expected_username:
+                identity = s.get(TelegramIdentity, uid)
+                if not identity or identity.username != expected_username:
+                    raise BusinessError(
+                        "Ник изменился после начала добавления. Начните заново: /adduser @ник."
+                    )
             if uid == actor_id and (role != Role.CHIEF or not active):
                 raise BusinessError("Нельзя отключить или понизить самого себя.")
             user = s.get(User, uid)
@@ -80,6 +141,17 @@ class Quotes:
         """Internal startup inventory, including revoked users to clear old menus."""
         with self.sessions() as s:
             return [(u.telegram_id, u.role if u.active else None) for u in s.scalars(select(User))]
+
+    def usernames(self, actor_id):
+        with self.sessions() as s:
+            authorize(s.get(User, actor_id), chief=True)
+            return dict(
+                s.execute(
+                    select(TelegramIdentity.telegram_id, TelegramIdentity.username).join(
+                        User, User.telegram_id == TelegramIdentity.telegram_id
+                    )
+                ).all()
+            )
 
     def import_catalog(self, uid, raw):
         authorize(self.user(uid), chief=True)

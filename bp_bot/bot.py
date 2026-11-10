@@ -44,9 +44,10 @@ HELP = """АТехника — коммерческие предложения
 
 Начальник:
 /users — пользователи
-/adduser — добавить пользователя с выбором роли
-/user ID manager|sales_head|chief ОТДЕЛ Имя Фамилия
-/disable ID — отключить пользователя
+/adduser [@ник или ID] — добавить пользователя с выбором роли
+/user ID|@ник manager|sales_head|chief ОТДЕЛ Имя Фамилия
+/disable [@ник или ID] — отключить доступ, сохранив КП и историю
+Для работы по нику пользователь сначала должен отправить боту /start.
 /vat НОМЕР ВЕРСИЯ СТАВКА ПРИЧИНА — изменить НДС
 Пришлите CSV с подписью /import для обновления каталога.
 """
@@ -136,7 +137,11 @@ class UI:
 
     async def set_user_command_menu(self, uid, role=None):
         commands = MENU_COMMANDS + (
-            [("adduser", "Добавить пользователя"), ("users", "Управление пользователями")]
+            [
+                ("adduser", "Добавить пользователя"),
+                ("users", "Управление пользователями"),
+                ("disable", "Отключить пользователя"),
+            ]
             if role == "chief"
             else []
         )
@@ -149,41 +154,86 @@ class UI:
             # A newly added user may not have opened the bot yet. /start retries.
             log.warning("command_menu_update_failure type=%s", type(error).__name__)
 
-    async def start_user_creation(self, message, uid):
+    async def start_user_creation(self, message, uid, reference=None):
         authorize(await asyncio.to_thread(self.quotes.user, uid), chief=True)
         await asyncio.to_thread(self.state, uid, {"mode": "add_user_id", "token": uuid.uuid4().hex[:16]})
-        await message.answer(
-            "Введите Telegram ID нового пользователя — число. Пользователь может узнать свой ID, "
-            "отправив боту /start. Отмена: /cancel."
-        )
+        if reference is not None:
+            await self.user_creation_input(message, uid, reference, await asyncio.to_thread(self.state, uid))
+        else:
+            await message.answer(
+                "Введите @ник или Telegram ID. Для добавления по нику пользователь сначала должен отправить боту /start. Отмена: /cancel."
+            )
+
+    async def resolve_user_reference(self, uid, reference):
+        target = await asyncio.to_thread(self.quotes.resolve_user_reference, uid, reference)
+        if target["username"]:
+            try:
+                chat = await self.bot.get_chat(target["id"])
+            except TelegramAPIError:
+                raise BusinessError(
+                    "Не удалось проверить актуальный ник. Попросите пользователя отправить /start или используйте его Telegram ID."
+                ) from None
+            current = (chat.username or "").casefold()
+            if current != target["username"]:
+                await asyncio.to_thread(
+                    self.quotes.remember_telegram_identity, target["id"], current or None, target["name"]
+                )
+                raise BusinessError(
+                    "Пользователь сменил ник. Попросите его отправить боту /start и повторите действие с актуальным ником или ID."
+                )
+        return target
 
     async def user_creation_input(self, message, uid, text, state):
         actor = await asyncio.to_thread(self.quotes.user, uid)
         authorize(actor, chief=True)
         if state["mode"] == "add_user_id":
-            if not text.isascii() or not text.isdecimal() or len(text) > 19 or not 0 < int(text) < 2**63:
-                raise BusinessError("Введите Telegram ID положительным числом, без @ и имени пользователя.")
-            if any(u.telegram_id == int(text) for u in await asyncio.to_thread(self.quotes.users, uid)):
+            target = await self.resolve_user_reference(uid, text)
+            if any(u.telegram_id == target["id"] for u in await asyncio.to_thread(self.quotes.users, uid)):
                 raise BusinessError(
                     "Пользователь уже добавлен. Для изменения роли используйте /user. Отмена: /cancel."
                 )
-            await asyncio.to_thread(self.state, uid, {**state, "mode": "add_user_name", "id": int(text)})
-            await message.answer("Введите имя и фамилию пользователя. Отмена: /cancel.")
+            target_state = {**state, "id": target["id"], "username": target["username"]}
+            if target["username"]:
+                await self.show_user_roles(message, uid, target_state, target["name"])
+            else:
+                await asyncio.to_thread(self.state, uid, {**target_state, "mode": "add_user_name"})
+                await message.answer("Введите имя и фамилию пользователя. Отмена: /cancel.")
         else:
-            if not text.strip() or len(text.strip()) > 120:
-                raise BusinessError("Имя должно содержать от 1 до 120 символов.")
-            await asyncio.to_thread(self.state, uid, {**state, "mode": "add_user_role", "name": text.strip()})
+            await self.show_user_roles(message, uid, state, text)
+
+    async def show_user_roles(self, message, uid, state, name):
+        actor = await asyncio.to_thread(self.quotes.user, uid)
+        authorize(actor, chief=True)
+        if not name.strip() or len(name.strip()) > 120:
+            raise BusinessError("Имя должно содержать от 1 до 120 символов.")
+        await asyncio.to_thread(self.state, uid, {**state, "mode": "add_user_role", "name": name.strip()})
+        label = "@" + state["username"] if state.get("username") else str(state["id"])
+        await message.answer(
+            f"Пользователь: {name.strip()} · {label} · ID {state['id']}\n"
+            "Выберите роль:\nМенеджер — свои КП.\nРуководитель продаж — КП своего отдела.\n"
+            "Начальник — все КП, управление пользователями, каталогом и НДС.\n"
+            f"Отдел нового пользователя: {actor.department}. Для другого отдела используйте /user.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text=label, callback_data=f"user_role:{state['token']}:{role}")]
+                    for role, label in USER_ROLES.items()
+                ]
+            ),
+        )
+
+    async def disable_user(self, message, uid, reference=None):
+        authorize(await asyncio.to_thread(self.quotes.user, uid), chief=True)
+        if reference is None:
+            await asyncio.to_thread(self.state, uid, {"mode": "disable_user"})
             await message.answer(
-                "Выберите роль:\nМенеджер — свои КП.\nРуководитель продаж — КП своего отдела.\n"
-                "Начальник — все КП, управление пользователями, каталогом и НДС.\n"
-                f"Отдел нового пользователя: {actor.department}. Для другого отдела используйте /user.",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text=label, callback_data=f"user_role:{state['token']}:{role}")]
-                        for role, label in USER_ROLES.items()
-                    ]
-                ),
+                "Введите @ник или Telegram ID пользователя для отключения доступа. КП и история сохранятся. Отмена: /cancel."
             )
+            return
+        await self.resolve_user_reference(uid, reference)
+        target = await asyncio.to_thread(self.quotes.disable_user, uid, reference)
+        await asyncio.to_thread(self.state, uid, delete=True)
+        await self.set_user_command_menu(target["id"])
+        await message.answer(f"Доступ отключён. Telegram ID: {target['id']}. КП и история сохранены.")
 
     async def files(self, message, qid, version):
         uid = message.chat.id
@@ -312,19 +362,34 @@ class UI:
         async def start(m: Message):
             if m.chat.type != "private":
                 return
+            await asyncio.to_thread(
+                self.quotes.remember_telegram_identity,
+                m.from_user.id,
+                m.from_user.username,
+                m.from_user.full_name,
+            )
             try:
                 user = await asyncio.to_thread(self.quotes.user, m.from_user.id)
                 await self.set_user_command_menu(user.telegram_id, user.role)
                 await m.answer(HELP)
             except BusinessError:
                 await m.answer(
-                    f"Доступ ещё не предоставлен. Передайте начальнику ваш Telegram ID: {m.from_user.id}"
+                    "Доступ ещё не предоставлен. "
+                    + (
+                        f"Начальник может добавить вас по нику @{m.from_user.username}. "
+                        if m.from_user.username
+                        else ""
+                    )
+                    + f"Ваш Telegram ID: {m.from_user.id}"
                 )
 
         @self.dp.message(F.chat.type == "private")
         async def handle(m: Message):
             try:
                 uid = m.from_user.id
+                await asyncio.to_thread(
+                    self.quotes.remember_telegram_identity, uid, m.from_user.username, m.from_user.full_name
+                )
                 user = await asyncio.to_thread(self.quotes.user, uid)
                 if m.document:
                     caption = (m.caption or "").strip()
@@ -472,44 +537,39 @@ class UI:
                     )
                     await self.show(m, result["id"], result["version"])
                 elif command == "/adduser":
-                    await self.start_user_creation(m, uid)
+                    if len(parts) > 2:
+                        raise BusinessError(
+                            "Формат: /adduser @ник или /adduser ID. Без параметров — пошаговое добавление."
+                        )
+                    await self.start_user_creation(m, uid, parts[1] if len(parts) > 1 else None)
                 elif command == "/user":
                     authorize(user, chief=True)
                     if len(parts) < 5:
                         raise BusinessError("Формат: /user ID manager|sales_head|chief ОТДЕЛ Имя Фамилия")
-                    await asyncio.to_thread(
-                        self.quotes.set_user, uid, int(parts[1]), parts[2], parts[3], " ".join(parts[4:])
-                    )
-                    await self.set_user_command_menu(int(parts[1]), parts[2])
-                    await m.answer("Пользователь сохранён.")
-                elif command == "/disable":
-                    target = next(
-                        (
-                            u
-                            for u in await asyncio.to_thread(self.quotes.users, uid)
-                            if u.telegram_id == int(parts[1])
-                        ),
-                        None,
-                    )
-                    if not target:
-                        raise BusinessError("Пользователь не найден.")
+                    target = await self.resolve_user_reference(uid, parts[1])
                     await asyncio.to_thread(
                         self.quotes.set_user,
                         uid,
-                        target.telegram_id,
-                        target.role,
-                        target.department,
-                        target.name,
-                        False,
+                        target["id"],
+                        parts[2],
+                        parts[3],
+                        " ".join(parts[4:]),
+                        expected_username=target["username"],
                     )
-                    await m.answer("Доступ отключён.")
-                    await self.set_user_command_menu(target.telegram_id)
+                    await self.set_user_command_menu(target["id"], parts[2])
+                    await m.answer("Пользователь сохранён.")
+                elif command == "/disable":
+                    if len(parts) > 2:
+                        raise BusinessError("Формат: /disable @ник или /disable ID.")
+                    await self.disable_user(m, uid, parts[1] if len(parts) > 1 else None)
                 elif command == "/users":
                     users = await asyncio.to_thread(self.quotes.users, uid)
+                    usernames = await asyncio.to_thread(self.quotes.usernames, uid)
                     await self.send(
                         m,
                         "\n".join(
-                            f"{u.telegram_id} · {u.name} · {USER_ROLES.get(u.role, u.role)} · {u.department} · "
+                            f"{u.telegram_id} · {('@' + usernames[u.telegram_id] + ' · ') if usernames.get(u.telegram_id) else ''}"
+                            f"{u.name} · {USER_ROLES.get(u.role, u.role)} · {u.department} · "
                             f"{'активен' if u.active else 'отключён'}"
                             for u in users
                         )
@@ -520,13 +580,21 @@ class UI:
                                     InlineKeyboardButton(
                                         text="Добавить пользователя", callback_data="users:add"
                                     )
-                                ]
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        text="Отключить пользователя", callback_data="users:disable"
+                                    )
+                                ],
                             ]
                         ),
                     )
                 elif command.startswith("/"):
                     await m.answer("Неизвестная команда. Откройте /help.")
                 else:
+                    if state and state.get("mode") == "disable_user":
+                        await self.disable_user(m, uid, text)
+                        return
                     if state and state.get("mode") in {"add_user_id", "add_user_name"}:
                         await self.user_creation_input(m, uid, text, state)
                         return
@@ -556,6 +624,9 @@ class UI:
             await c.answer()
             try:
                 uid = c.from_user.id
+                await asyncio.to_thread(
+                    self.quotes.remember_telegram_identity, uid, c.from_user.username, c.from_user.full_name
+                )
                 await asyncio.to_thread(self.quotes.user, uid)
                 data = (c.data or "").split(":")
                 if data[0] == "cancel":
@@ -563,6 +634,8 @@ class UI:
                     await c.message.answer("Ввод отменён.")
                 elif data == ["users", "add"]:
                     await self.start_user_creation(c.message, uid)
+                elif data == ["users", "disable"]:
+                    await self.disable_user(c.message, uid)
                 elif data[0] == "user_role":
                     actor = await asyncio.to_thread(self.quotes.user, uid)
                     authorize(actor, chief=True)
@@ -578,6 +651,12 @@ class UI:
                         )
                     if data[2] not in USER_ROLES:
                         raise BusinessError("Неизвестная роль. Выберите роль из списка.")
+                    if st.get("username"):
+                        target = await self.resolve_user_reference(uid, "@" + st["username"])
+                        if target["id"] != st["id"]:
+                            raise BusinessError(
+                                "Ник изменился после начала добавления. Начните заново: /adduser @ник."
+                            )
                     await asyncio.to_thread(
                         self.quotes.set_user,
                         uid,
@@ -586,6 +665,7 @@ class UI:
                         actor.department,
                         st["name"],
                         create_only=True,
+                        expected_username=st.get("username"),
                     )
                     await asyncio.to_thread(self.state, uid, delete=True)
                     await self.set_user_command_menu(st["id"], data[2])
