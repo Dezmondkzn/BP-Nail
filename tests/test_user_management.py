@@ -140,3 +140,63 @@ def test_role_is_rechecked_on_every_wizard_step(admin_ui, service):
             service.user(555)
 
     asyncio.run(flow())
+
+
+def menus(bot):
+    return [
+        call.args[1] for call in bot.session.call_args_list if type(call.args[1]).__name__ == "SetMyCommands"
+    ]
+
+
+def test_start_and_role_changes_refresh_chat_command_menu(admin_ui, service):
+    ui, bot = admin_ui
+
+    async def flow():
+        await feed(ui, bot, 1, "/start")
+        chief_menu = menus(bot)[-1]
+        assert chief_menu.scope.chat_id == 1
+        assert {"adduser", "users", "new"} <= {c.command for c in chief_menu.commands}
+        await feed(ui, bot, 2, "/start")
+        assert "adduser" not in {c.command for c in menus(bot)[-1].commands}
+        await feed(ui, bot, 1, "/user 2 chief main Менеджер")
+        assert menus(bot)[-1].scope.chat_id == 2
+        assert "adduser" in {c.command for c in menus(bot)[-1].commands}
+        await feed(ui, bot, 1, "/user 2 manager main Менеджер")
+        assert "adduser" not in {c.command for c in menus(bot)[-1].commands}
+
+    asyncio.run(flow())
+
+
+def test_startup_refreshes_chief_menu_and_clears_disabled_chief_menu(admin_ui, service):
+    from types import SimpleNamespace
+
+    ui, bot = admin_ui
+    service.set_user(1, 50, "chief", "main", "Отключённый начальник", False)
+    bot.get_webhook_info = AsyncMock(return_value=SimpleNamespace(url=""))
+    ui.dp.start_polling = AsyncMock()
+    asyncio.run(ui.run())
+    scoped = {m.scope.chat_id: {c.command for c in m.commands} for m in menus(bot) if m.scope is not None}
+    assert "adduser" in scoped[1]
+    assert "adduser" not in scoped[2]
+    assert "adduser" not in scoped[50]
+    ui.dp.start_polling.assert_awaited_once()
+
+
+def test_unknown_chat_menu_failure_does_not_block_user_creation(admin_ui, service):
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SetMyCommands
+
+    ui, bot = admin_ui
+    bot.set_my_commands = AsyncMock(
+        side_effect=TelegramBadRequest(method=SetMyCommands(commands=[]), message="chat not found")
+    )
+
+    async def flow():
+        await feed(ui, bot, 1, "/adduser")
+        await feed(ui, bot, 1, "555")
+        await feed(ui, bot, 1, "Новый пользователь")
+        await feed(ui, bot, 1, data=f"user_role:{ui.state(1)['token']}:chief")
+        assert service.user(555).role == "chief"
+        assert "Пользователь добавлен" in bot.session.call_args.args[1].text
+
+    asyncio.run(flow())

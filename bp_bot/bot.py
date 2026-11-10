@@ -5,7 +5,7 @@ import uuid
 from decimal import Decimal
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramForbiddenError, TelegramAPIError
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     BufferedInputFile,
     BotCommand,
+    BotCommandScopeChat,
 )
 from pydantic import ValidationError
 from .catalog import ProductChoice
@@ -52,6 +53,13 @@ HELP = """АТехника — коммерческие предложения
 
 
 USER_ROLES = {"manager": "Менеджер", "sales_head": "Руководитель продаж", "chief": "Начальник"}
+MENU_COMMANDS = [
+    ("new", "Новое КП"),
+    ("catalog", "Каталог"),
+    ("my", "Мои КП"),
+    ("cancel", "Отменить ввод"),
+    ("help", "Помощь"),
+]
 
 
 def buttons(qid, version):
@@ -125,6 +133,21 @@ class UI:
     async def show(self, message, qid, version=None):
         v = await asyncio.to_thread(self.quotes.view, message.chat.id, qid, version)
         await self.send(message, format_view(v), buttons(v["id"], v["version"]))
+
+    async def set_user_command_menu(self, uid, role=None):
+        commands = MENU_COMMANDS + (
+            [("adduser", "Добавить пользователя"), ("users", "Управление пользователями")]
+            if role == "chief"
+            else []
+        )
+        try:
+            await self.bot.set_my_commands(
+                [BotCommand(command=c, description=d) for c, d in commands],
+                scope=BotCommandScopeChat(chat_id=uid),
+            )
+        except TelegramAPIError as error:
+            # A newly added user may not have opened the bot yet. /start retries.
+            log.warning("command_menu_update_failure type=%s", type(error).__name__)
 
     async def start_user_creation(self, message, uid):
         authorize(await asyncio.to_thread(self.quotes.user, uid), chief=True)
@@ -290,7 +313,8 @@ class UI:
             if m.chat.type != "private":
                 return
             try:
-                await asyncio.to_thread(self.quotes.user, m.from_user.id)
+                user = await asyncio.to_thread(self.quotes.user, m.from_user.id)
+                await self.set_user_command_menu(user.telegram_id, user.role)
                 await m.answer(HELP)
             except BusinessError:
                 await m.answer(
@@ -456,6 +480,7 @@ class UI:
                     await asyncio.to_thread(
                         self.quotes.set_user, uid, int(parts[1]), parts[2], parts[3], " ".join(parts[4:])
                     )
+                    await self.set_user_command_menu(int(parts[1]), parts[2])
                     await m.answer("Пользователь сохранён.")
                 elif command == "/disable":
                     target = next(
@@ -478,6 +503,7 @@ class UI:
                         False,
                     )
                     await m.answer("Доступ отключён.")
+                    await self.set_user_command_menu(target.telegram_id)
                 elif command == "/users":
                     users = await asyncio.to_thread(self.quotes.users, uid)
                     await self.send(
@@ -562,6 +588,7 @@ class UI:
                         create_only=True,
                     )
                     await asyncio.to_thread(self.state, uid, delete=True)
+                    await self.set_user_command_menu(st["id"], data[2])
                     await c.message.answer(
                         f"Пользователь добавлен: {st['name']}\nTelegram ID: {st['id']}\n"
                         f"Роль: {USER_ROLES[data[2]]}\nОтдел: {actor.department}.\n"
@@ -625,18 +652,9 @@ class UI:
         webhook = await self.bot.get_webhook_info()
         if webhook.url:
             raise RuntimeError("Existing webhook detected; remove it explicitly before switching to polling")
-        await self.bot.set_my_commands(
-            [
-                BotCommand(command=c, description=d)
-                for c, d in [
-                    ("new", "Новое КП"),
-                    ("catalog", "Каталог"),
-                    ("my", "Мои КП"),
-                    ("cancel", "Отменить ввод"),
-                    ("help", "Помощь"),
-                ]
-            ]
-        )
+        await self.bot.set_my_commands([BotCommand(command=c, description=d) for c, d in MENU_COMMANDS])
+        for uid, role in await asyncio.to_thread(self.quotes._command_menu_users):
+            await self.set_user_command_menu(uid, role)
         # Sequential processing prevents races between conversation context and message edits.
         # Rendering runs in a separate durable worker, so LibreOffice never blocks polling.
         await self.dp.start_polling(

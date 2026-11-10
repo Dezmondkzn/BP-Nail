@@ -76,6 +76,11 @@ class Quotes:
             authorize(s.get(User, actor_id), chief=True)
             return list(s.scalars(select(User).order_by(User.name)))
 
+    def _command_menu_users(self):
+        """Internal startup inventory, including revoked users to clear old menus."""
+        with self.sessions() as s:
+            return [(u.telegram_id, u.role if u.active else None) for u in s.scalars(select(User))]
+
     def import_catalog(self, uid, raw):
         authorize(self.user(uid), chief=True)
         rows = parse_catalog(raw)
