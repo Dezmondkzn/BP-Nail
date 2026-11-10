@@ -45,7 +45,7 @@ class Quotes:
                         )
                 s.add(AppValue(key="bootstrap_done", value={"done": True}))
 
-    def set_user(self, actor_id, uid, role, department, name, active=True):
+    def set_user(self, actor_id, uid, role, department, name, active=True, create_only=False):
         if role not in set(Role) or uid <= 0 or not name.strip() or not department.strip():
             raise BusinessError("Проверьте ID, роль, отдел и имя.")
         if len(name) > 120 or len(department) > 80:
@@ -55,6 +55,10 @@ class Quotes:
             if uid == actor_id and (role != Role.CHIEF or not active):
                 raise BusinessError("Нельзя отключить или понизить самого себя.")
             user = s.get(User, uid)
+            if user is not None and create_only:
+                raise BusinessError(
+                    "Пользователь уже добавлен. Для изменения роли используйте /user, для отключения — /disable."
+                )
             if user is None:
                 user = User(telegram_id=uid)
                 s.add(user)

@@ -43,11 +43,15 @@ HELP = """АТехника — коммерческие предложения
 
 Начальник:
 /users — пользователи
+/adduser — добавить пользователя с выбором роли
 /user ID manager|sales_head|chief ОТДЕЛ Имя Фамилия
 /disable ID — отключить пользователя
 /vat НОМЕР ВЕРСИЯ СТАВКА ПРИЧИНА — изменить НДС
 Пришлите CSV с подписью /import для обновления каталога.
 """
+
+
+USER_ROLES = {"manager": "Менеджер", "sales_head": "Руководитель продаж", "chief": "Начальник"}
 
 
 def buttons(qid, version):
@@ -121,6 +125,42 @@ class UI:
     async def show(self, message, qid, version=None):
         v = await asyncio.to_thread(self.quotes.view, message.chat.id, qid, version)
         await self.send(message, format_view(v), buttons(v["id"], v["version"]))
+
+    async def start_user_creation(self, message, uid):
+        authorize(await asyncio.to_thread(self.quotes.user, uid), chief=True)
+        await asyncio.to_thread(self.state, uid, {"mode": "add_user_id", "token": uuid.uuid4().hex[:16]})
+        await message.answer(
+            "Введите Telegram ID нового пользователя — число. Пользователь может узнать свой ID, "
+            "отправив боту /start. Отмена: /cancel."
+        )
+
+    async def user_creation_input(self, message, uid, text, state):
+        actor = await asyncio.to_thread(self.quotes.user, uid)
+        authorize(actor, chief=True)
+        if state["mode"] == "add_user_id":
+            if not text.isascii() or not text.isdecimal() or len(text) > 19 or not 0 < int(text) < 2**63:
+                raise BusinessError("Введите Telegram ID положительным числом, без @ и имени пользователя.")
+            if any(u.telegram_id == int(text) for u in await asyncio.to_thread(self.quotes.users, uid)):
+                raise BusinessError(
+                    "Пользователь уже добавлен. Для изменения роли используйте /user. Отмена: /cancel."
+                )
+            await asyncio.to_thread(self.state, uid, {**state, "mode": "add_user_name", "id": int(text)})
+            await message.answer("Введите имя и фамилию пользователя. Отмена: /cancel.")
+        else:
+            if not text.strip() or len(text.strip()) > 120:
+                raise BusinessError("Имя должно содержать от 1 до 120 символов.")
+            await asyncio.to_thread(self.state, uid, {**state, "mode": "add_user_role", "name": text.strip()})
+            await message.answer(
+                "Выберите роль:\nМенеджер — свои КП.\nРуководитель продаж — КП своего отдела.\n"
+                "Начальник — все КП, управление пользователями, каталогом и НДС.\n"
+                f"Отдел нового пользователя: {actor.department}. Для другого отдела используйте /user.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text=label, callback_data=f"user_role:{state['token']}:{role}")]
+                        for role, label in USER_ROLES.items()
+                    ]
+                ),
+            )
 
     async def files(self, message, qid, version):
         uid = message.chat.id
@@ -294,6 +334,10 @@ class UI:
                     return
                 state = await asyncio.to_thread(self.state, uid)
                 request_key = f"message:{uid}:{m.message_id}"
+                if m.voice and state and state.get("mode", "").startswith("add_user_"):
+                    raise BusinessError(
+                        "При добавлении пользователя вводите данные текстом и выбирайте роль кнопкой. Отмена: /cancel."
+                    )
                 if m.voice:
                     if (
                         m.voice.duration > self.settings.max_voice_seconds
@@ -403,7 +447,12 @@ class UI:
                         reason=reason,
                     )
                     await self.show(m, result["id"], result["version"])
+                elif command == "/adduser":
+                    await self.start_user_creation(m, uid)
                 elif command == "/user":
+                    authorize(user, chief=True)
+                    if len(parts) < 5:
+                        raise BusinessError("Формат: /user ID manager|sales_head|chief ОТДЕЛ Имя Фамилия")
                     await asyncio.to_thread(
                         self.quotes.set_user, uid, int(parts[1]), parts[2], parts[3], " ".join(parts[4:])
                     )
@@ -434,14 +483,30 @@ class UI:
                     await self.send(
                         m,
                         "\n".join(
-                            f"{u.telegram_id} · {u.name} · {u.role} · {u.department} · "
+                            f"{u.telegram_id} · {u.name} · {USER_ROLES.get(u.role, u.role)} · {u.department} · "
                             f"{'активен' if u.active else 'отключён'}"
                             for u in users
+                        )
+                        or "Пользователей пока нет.",
+                        InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text="Добавить пользователя", callback_data="users:add"
+                                    )
+                                ]
+                            ]
                         ),
                     )
                 elif command.startswith("/"):
                     await m.answer("Неизвестная команда. Откройте /help.")
                 else:
+                    if state and state.get("mode") in {"add_user_id", "add_user_name"}:
+                        await self.user_creation_input(m, uid, text, state)
+                        return
+                    if state and state.get("mode") == "add_user_role":
+                        authorize(user, chief=True)
+                        raise BusinessError("Выберите роль кнопкой или отмените добавление /cancel.")
                     if state and state.get("mode") == "product":
                         raise BusinessError("Выберите технику кнопкой или отмените ввод /cancel.")
                     if state and state.get("mode") == "voice":
@@ -470,6 +535,38 @@ class UI:
                 if data[0] == "cancel":
                     await asyncio.to_thread(self.state, uid, delete=True)
                     await c.message.answer("Ввод отменён.")
+                elif data == ["users", "add"]:
+                    await self.start_user_creation(c.message, uid)
+                elif data[0] == "user_role":
+                    actor = await asyncio.to_thread(self.quotes.user, uid)
+                    authorize(actor, chief=True)
+                    st = await asyncio.to_thread(self.state, uid)
+                    if (
+                        len(data) != 3
+                        or not st
+                        or st.get("mode") != "add_user_role"
+                        or st.get("token") != data[1]
+                    ):
+                        raise BusinessError(
+                            "Это добавление уже завершено или отменено. Начните заново: /adduser."
+                        )
+                    if data[2] not in USER_ROLES:
+                        raise BusinessError("Неизвестная роль. Выберите роль из списка.")
+                    await asyncio.to_thread(
+                        self.quotes.set_user,
+                        uid,
+                        st["id"],
+                        data[2],
+                        actor.department,
+                        st["name"],
+                        create_only=True,
+                    )
+                    await asyncio.to_thread(self.state, uid, delete=True)
+                    await c.message.answer(
+                        f"Пользователь добавлен: {st['name']}\nTelegram ID: {st['id']}\n"
+                        f"Роль: {USER_ROLES[data[2]]}\nОтдел: {actor.department}.\n"
+                        "Пользователь может открыть бота и отправить /start."
+                    )
                 elif data[0] == "product":
                     st = await asyncio.to_thread(self.state, uid)
                     if not st or st.get("mode") != "product" or st.get("token") != data[1]:
