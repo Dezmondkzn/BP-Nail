@@ -23,6 +23,7 @@ from .documents import validate_letterhead
 
 log = logging.getLogger(__name__)
 HELP = """АТехника — коммерческие предложения
+/secretary — протокол встречи или звонка
 /new — новое КП, затем напишите запрос или отправьте голосовое
 /catalog [поиск] — каталог с SKU
 /my — доступные КП
@@ -56,6 +57,7 @@ HELP = """АТехника — коммерческие предложения
 USER_ROLES = {"manager": "Менеджер", "sales_head": "Руководитель продаж", "chief": "Начальник"}
 MENU_COMMANDS = [
     ("new", "Новое КП"),
+    ("secretary", "Секретарь"),
     ("catalog", "Каталог"),
     ("my", "Мои КП"),
     ("cancel", "Отменить ввод"),
@@ -423,6 +425,55 @@ class UI:
                     return
                 state = await asyncio.to_thread(self.state, uid)
                 request_key = f"message:{uid}:{m.message_id}"
+                if m.text == "/secretary":
+                    token = uuid.uuid4().hex[:16]
+                    await asyncio.to_thread(self.state, uid, {"mode": "secretary_kind", "token": token})
+                    await m.answer(
+                        "Какой протокол подготовить?",
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(text=name, callback_data=f"sec:{token}:{name}")
+                                    for name in ("Встреча", "Звонок")
+                                ]
+                            ]
+                        ),
+                    )
+                    return
+                if (
+                    state
+                    and state["mode"].startswith("secretary")
+                    and (m.voice or (m.text and not m.text.startswith("/")))
+                ):
+                    if state["mode"] == "secretary_kind":
+                        raise BusinessError("Выберите встречу или звонок кнопкой выше.")
+                    notes = m.text
+                    if m.voice:
+                        if (
+                            m.voice.duration > self.settings.max_voice_seconds
+                            or (m.voice.file_size or 0) > self.settings.max_file_bytes
+                        ):
+                            raise BusinessError("Пришлите голосовое до 3 минут и 10 МБ.")
+                        raw = io.BytesIO()
+                        await self.bot.download(m.voice, destination=raw)
+                        notes = await self.ai.transcribe(raw.getvalue())
+                    draft = await self.ai.protocol(notes, state.get("draft"), self.quotes.today())
+                    token = uuid.uuid4().hex[:16]
+                    await asyncio.to_thread(self.state, uid, {**state, "draft": draft, "token": token})
+                    await self.send(
+                        m,
+                        f"Черновик · {state['kind']}\n{draft}\n\nПришлите поправку текстом или голосом либо подтвердите.",
+                        InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text="Подтвердить протокол", callback_data=f"sec:{token}:ok"
+                                    )
+                                ]
+                            ]
+                        ),
+                    )
+                    return
                 if m.voice and state and state.get("mode", "").startswith("add_user_"):
                     raise BusinessError(
                         "При добавлении пользователя вводите данные текстом и выбирайте роль кнопкой. Отмена: /cancel."
@@ -632,6 +683,16 @@ class UI:
                 if data[0] == "cancel":
                     await asyncio.to_thread(self.state, uid, delete=True)
                     await c.message.answer("Ввод отменён.")
+                elif data[0] == "sec":
+                    st = await asyncio.to_thread(self.state, uid)
+                    if len(data) != 3 or not st or st.get("token") != data[1]:
+                        raise BusinessError("Эта кнопка устарела. Используйте последнюю карточку.")
+                    if st["mode"] == "secretary_kind" and data[2] in {"Встреча", "Звонок"}:
+                        await asyncio.to_thread(self.state, uid, {"mode": "secretary", "kind": data[2]})
+                        await c.message.answer("Напишите или надиктуйте итоги. Отмена: /cancel.")
+                    elif st["mode"] == "secretary" and data[2] == "ok" and st.get("draft"):
+                        await self.send(c.message, f"Подтверждённый протокол · {st['kind']}\n{st['draft']}")
+                        await asyncio.to_thread(self.state, uid, delete=True)
                 elif data == ["users", "add"]:
                     await self.start_user_creation(c.message, uid)
                 elif data == ["users", "disable"]:

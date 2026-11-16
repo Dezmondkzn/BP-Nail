@@ -200,3 +200,24 @@ def test_unknown_chat_menu_failure_does_not_block_user_creation(admin_ui, servic
         assert "Пользователь добавлен" in bot.session.call_args.args[1].text
 
     asyncio.run(flow())
+
+
+def test_secretary_revision_and_confirmation(admin_ui):
+    ui, bot = admin_ui
+    ui.ai.protocol = AsyncMock(side_effect=["Отправить КП", "Отправить КП завтра"])
+
+    async def flow():
+        await feed(ui, bot, 2, "/secretary")
+        await feed(ui, bot, 2, data=f"sec:{ui.state(2)['token']}:Звонок")
+        await feed(ui, bot, 2, "Обещал отправить КП")
+        first = ui.state(2)
+        await feed(ui, bot, 2, "Срок завтра")
+        assert ui.ai.protocol.await_args.args[1] == first["draft"]
+        await feed(ui, bot, 2, data=f"sec:{first['token']}:ok")
+        current = ui.state(2)
+        assert current["draft"] == "Отправить КП завтра"
+        await feed(ui, bot, 2, data=f"sec:{current['token']}:ok")
+        assert ui.state(2) is None
+        assert current["draft"] in bot.session.call_args.args[1].text
+
+    asyncio.run(flow())
