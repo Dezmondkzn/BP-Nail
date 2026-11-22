@@ -15,3 +15,7 @@ private/
 !docs/catalog.example.csv
 build/
 dist/
+graphify-out/cache/
+graphify-out/.*
+graphify-out/graph.html
+graphify-out/cost.json
