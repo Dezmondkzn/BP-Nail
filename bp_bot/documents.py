@@ -125,9 +125,10 @@ def build_template(letterhead, target):
     d.add_paragraph("В том числе НДС: {{ vat }} ₽. Стоимость без НДС: {{ net }} ₽.")
     d.add_paragraph("Условия поставки и оплаты", "Heading 1")
     d.add_paragraph(
-        "Оплата: 100% предоплата.\nПоставка: {{ delivery_terms }}\n"
+        "Оплата: {{ payment_terms }}\nПоставка: {{ delivery_terms }}\n"
         "Получение: {{ collection }}\nПредложение действительно до {{ valid_until }} включительно."
     )
+    d.add_paragraph("Скидка: {{ discount_percent }}% (учтена в сумме).\n{{ additional_terms }}")
     d.add_paragraph("{{ fx_note }}")
     d.add_paragraph("Для подготовки договора свяжитесь с менеджером и направьте реквизиты вашей организации.")
     d.save(target)
@@ -169,6 +170,9 @@ def generate(letterhead, view, soffice="soffice"):
                 fx_note="\n".join(fx),
             )
             context["valid_until"] = date.fromisoformat(p["valid_until"]).strftime("%d.%m.%Y")
+            context.setdefault("payment_terms", "Предоплата 100%.")
+            context.setdefault("discount_percent", "0")
+            context.setdefault("additional_terms", "")
             doc.render(context, jinja_env=SandboxedEnvironment(undefined=StrictUndefined), autoescape=True)
             output = root / "proposal.docx"
             doc.save(output)
