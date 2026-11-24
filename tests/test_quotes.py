@@ -23,7 +23,7 @@ def test_calculations_and_locked_prices(service):
     view = service.view(2, result["id"])
     assert view["payload"]["totals"] == {"gross": "8350000.00", "vat": "1505737.70", "net": "6844262.30"}
     with pytest.raises(BusinessError):
-        service.revise(2, result["id"], 1, ProposalPatch(forbidden_requests=["цена 1 рубль"]), "b")
+        service.revise(2, result["id"], 1, ProposalPatch(forbidden_requests=["сменить менеджера"]), "b")
     assert service.view(2, result["id"])["version"] == 1
 
 
@@ -155,12 +155,11 @@ def test_document_jobs_only_for_finished_versions(service):
         assert len(list(s.scalars(select(Version)))) == 1
 
 
-def test_delivery_field_cannot_override_payment_or_price(service):
-    with pytest.raises(BusinessError, match="Срок поставки"):
-        service.create(2, patch(delivery_terms="10 дней, предоплата 50%, цена 1 рубль"), "bad")
-    assert service.list_quotes(2) == []
+def test_delivery_does_not_invent_payment_condition(service):
     q = service.create(2, patch(delivery_terms="10 рабочих дней"), "good")["id"]
-    assert service.view(2, q)["payload"]["delivery_terms"] == "В течение 10 рабочих дней после полной оплаты."
+    assert service.view(2, q)["payload"]["delivery_terms"] == "В течение 10 рабочих дней."
+    service.revise(2, q, 1, ProposalPatch(delivery_terms="5 дней после аванса"), "advance")
+    assert service.view(2, q)["payload"]["delivery_terms"] == "5 дней после аванса"
 
 
 def test_manager_completes_existing_draft_after_letterhead_upload(service):

@@ -42,11 +42,15 @@ def proposal_format():
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "description": "Цена за единицу в рублях с НДС: десятичная строка, например 2730000.00, либо null.",
         }
+    schema["properties"]["discount_percent"] = {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "description": "Скидка на всё КП в процентах от 0 до 100, до двух знаков после точки; 0 отменяет скидку.",
+    }
     return {"type": "json_schema", "name": "ProposalPatch", "schema": schema, "strict": True}
 
 
 # Deterministic mode for operation/testing without an AI key.
-# Unknown keys fail closed; pricing/roles can never enter the domain through this path.
+# Unknown keys fail closed; VAT and access roles cannot enter through this path.
 def parse_fields(text):
     aliases = {
         "клиент": "client",
@@ -54,6 +58,10 @@ def parse_fields(text):
         "поставка": "delivery_terms",
         "до": "valid_until",
         "цена": "unit_price",
+        "оплата": "payment_terms",
+        "доставка": "collection",
+        "условия": "additional_terms",
+        "скидка": "discount_percent",
     }
     values = {}
     for segment in text.split(";"):
@@ -67,7 +75,8 @@ def parse_fields(text):
         key = aliases.get(key.strip().lower())
         if not key or key in values:
             raise BusinessError(
-                "Неизвестное или повторное поле. Разрешены: клиент, позиции, цена, поставка, до."
+                "Неизвестное или повторное поле. Разрешены: клиент, позиции, цена, поставка, "
+                "до, оплата, доставка, условия, скидка."
             )
         val = val.strip()
         if key == "items":
@@ -81,6 +90,8 @@ def parse_fields(text):
                     item["unit_price"] = fields[2]
                 items.append(item)
             values[key] = items
+        elif key == "discount_percent":
+            values[key] = val.removesuffix("%").strip().replace(",", ".")
         else:
             values[key] = val
     return ProposalPatch.model_validate(values)
@@ -95,7 +106,7 @@ class AI:
     async def parse(self, text, today: date):
         if len(text) > 6000:
             raise BusinessError("Запрос слишком длинный (до 6000 символов).")
-        if re.match(r"\s*(клиент|позиции|цена|поставка|до)\s*=", text, re.I):
+        if re.match(r"\s*(клиент|позиции|цена|поставка|до|оплата|доставка|условия|скидка)\s*=", text, re.I):
             return parse_fields(text).safe()
         if not self.client or not self.settings.openai_text_model:
             raise BusinessError(
@@ -110,16 +121,25 @@ class AI:
             "весь items=null, пользователь уточнит через каталог. "
             "items заменяет весь список позиций. product_query сохраняет точное название/комплектацию или SKU. "
             "Не включай в product_query вводные слова «модель», «марка», «техника», «оборудование». "
-            "valid_until — конечная дата предложения ISO. delivery_terms — срок в форме N рабочих дней "
-            "или N календарных дней, от 1 до 730. Если дана только дата, оставь null для уточнения. "
-            "не доставка/гарантия. Цена разрешена: unit_price — явно названная менеджером цена "
+            "valid_until — только конечная дата предложения ISO, не дата платежа или поставки. "
+            "delivery_terms — указанный срок поставки, дата или событие отсчёта. Число дней пиши цифрами. "
+            "Не добавляй зависимость от полной оплаты, если пользователь её не указал. "
+            "payment_terms — условия оплаты и полный график: сохрани все доли/суммы и даты платежей, "
+            "не выдумывай недостающие годы и не заменяй рассрочку предоплатой. "
+            "collection — доставка, самовывоз и включение доставки в стоимость. "
+            "additional_terms — прочие коммерческие условия, в том числе гарантия; пустая строка удаляет их. "
+            "discount_percent — явно указанная общая скидка в процентах 0–100; отмена скидки = 0. "
+            "Скидка применяется сервисом к цене всех позиций; не вычитай её из unit_price сам. "
+            "Цена разрешена: unit_price — явно названная менеджером цена до этой скидки "
             "за единицу в рублях с НДС. Миллионы и тысячи преобразуй в рубли. "
             "Не выводи цену из каталога или общей суммы: если цена за единицу неясна, null. "
             "Для каждой позиции передавай items[].unit_price. Для правки цены единственной "
             "позиции без замены состава используй верхнеуровневый unit_price. "
             "Если указана другая валюта или цена без НДС, не пересчитывай: unit_price=null для уточнения. "
-            "Запросы изменить скидку, НДС, оплату, "
-            "реквизиты продавца, менеджера, роль или типовые условия перечисли в forbidden_requests; "
+            "Оплату, график платежей, скидку, поставку, доставку и прочие коммерческие условия "
+            "могут менять все роли; такие запросы не запрещены. "
+            "Запросы изменить ставку НДС, реквизиты продавца, менеджера или роль перечисли в forbidden_requests; "
+            "Упоминание включённого в цену НДС не является запросом изменить ставку. "
             "не маскируй их под другое поле. Даже начальник меняет НДС только отдельной командой. "
             "Для запроса правки передавай только явно названные поля."
         )

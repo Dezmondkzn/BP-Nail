@@ -88,7 +88,7 @@ def test_exact_reported_request_creates_quote_with_live_extracted_fields(service
         assert payload["items"][0]["unit_price"] == "8350000.00"
         assert payload["totals"]["gross"] == "8350000.00"
         assert payload["valid_until"] == "2026-11-20"
-        assert payload["delivery_terms"] == "В течение 10 рабочих дней после полной оплаты."
+        assert payload["delivery_terms"] == "В течение 10 рабочих дней."
         assert ui.state(2) is None
 
     asyncio.run(flow())

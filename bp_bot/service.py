@@ -241,7 +241,14 @@ class Quotes:
 
     def _apply(self, s, data, patch):
         patch.safe()
-        for key in ("client", "delivery_terms", "valid_until"):
+        for key in (
+            "client",
+            "delivery_terms",
+            "valid_until",
+            "payment_terms",
+            "collection",
+            "additional_terms",
+        ):
             val = getattr(patch, key)
             if val is not None:
                 data[key] = val.isoformat() if isinstance(val, date) else val.strip()
@@ -257,11 +264,22 @@ class Quotes:
             item = data["items"][0]
             unit = money(patch.unit_price)
             item.update(
+                base_unit_price=str(unit),
                 unit_price=str(unit),
                 line_total=str(money(unit * item["quantity"])),
                 currency="RUB",
                 pricing_source="manager",
             )
+        if patch.discount_percent is not None:
+            data["discount_percent"] = str(patch.discount_percent)
+        discount = Decimal(data.get("discount_percent", "0"))
+        for item in data.get("items", []):
+            # Keep the undiscounted price to avoid compounding on later revisions.
+            base = item.setdefault("base_unit_price", item.get("unit_price"))
+            if base is not None:
+                unit = money(Decimal(base) * (100 - discount) / 100)
+                item["unit_price"] = str(unit)
+                item["line_total"] = str(money(unit * item["quantity"]))
         data["template_version"] = "2"
         if data.get("valid_until") and date.fromisoformat(data["valid_until"]) < self.today():
             raise BusinessError("Срок предложения не может быть в прошлом.")
@@ -286,6 +304,9 @@ class Quotes:
                         "valid_until": None,
                         "manager": actor.name,
                         "prepayment": 100,
+                        "payment_terms": "Предоплата 100%.",
+                        "discount_percent": "0",
+                        "additional_terms": "",
                         "collection": "Самовывоз. Доставка в стоимость не включена.",
                         "letterhead_key": letterhead.value["key"] if letterhead else None,
                         "template_version": "2",

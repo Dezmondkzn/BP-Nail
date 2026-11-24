@@ -191,4 +191,4 @@ def test_money_string_keeps_exact_price_and_safe_delivery_terms():
     ai, _ = configured_ai([result])
     p = asyncio.run(ai.parse("Сделай КП", date(2026, 11, 7)))
     assert p.items[0].unit_price == Decimal("2730000.01")
-    assert p.delivery_terms == "В течение 6 рабочих дней после полной оплаты."
+    assert p.delivery_terms == "В течение 6 рабочих дней."

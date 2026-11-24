@@ -93,11 +93,14 @@ def format_view(v):
         )
     lines += [
         f"Итого: {p['totals']['gross'] or 'не определено'} ₽; в т. ч. НДС {p['totals']['vat'] or 'не определён'} ₽",
-        "Оплата: 100% предоплата",
+        f"Скидка: {p.get('discount_percent', '0')}% (учтена в ценах и сумме)",
+        f"Оплата: {p.get('payment_terms') or 'Предоплата 100%.'}",
         f"Поставка: {p.get('delivery_terms') or 'не указана'}",
         p["collection"],
         f"Действует до: {p.get('valid_until') or 'не указано'}",
     ]
+    if p.get("additional_terms"):
+        lines.append("Дополнительные условия: " + p["additional_terms"])
     if v["missing"]:
         lines.append("Нужно заполнить: " + "; ".join(v["missing"]))
     return "\n".join(lines)

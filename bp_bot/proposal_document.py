@@ -125,8 +125,12 @@ def build_proposal(letterhead, view, target):
         f"Итого: {rub(payload['totals']['gross'])} руб., в том числе НДС {rub(payload['totals']['vat'])} руб."
     )
     d.add_paragraph("1. Срок поставки: " + payload["delivery_terms"])
-    d.add_paragraph("2. Условия оплаты: предоплата 100%.")
+    d.add_paragraph("2. Условия оплаты: " + (payload.get("payment_terms") or "Предоплата 100%."))
     d.add_paragraph("3. Условия поставки: " + payload["collection"])
+    if payload.get("discount_percent") and float(payload["discount_percent"]):
+        d.add_paragraph(f"Скидка: {payload['discount_percent']}%. Учтена в ценах и итоговой сумме.")
+    if payload.get("additional_terms"):
+        d.add_paragraph("Дополнительные условия: " + payload["additional_terms"])
     d.add_paragraph(
         "Предложение действительно до "
         + date.fromisoformat(payload["valid_until"]).strftime("%d.%m.%Y")

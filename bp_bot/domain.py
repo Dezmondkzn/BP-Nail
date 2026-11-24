@@ -41,29 +41,39 @@ class ProposalPatch(BaseModel):
     client: str | None = Field(default=None, max_length=300)
     items: list[ItemInput] | None = Field(default=None, max_length=20)
     delivery_terms: str | None = Field(default=None, max_length=500)
+    payment_terms: str | None = Field(default=None, min_length=1, max_length=1500)
+    collection: str | None = Field(default=None, min_length=1, max_length=500)
+    additional_terms: str | None = Field(default=None, max_length=1000)
+    discount_percent: Decimal | None = Field(default=None, ge=0, le=100, decimal_places=2)
     valid_until: date | None = None
     forbidden_requests: list[str] = Field(default_factory=list, max_length=20)
 
     def safe(self):
         if self.forbidden_requests:
             raise BusinessError(
-                "Нельзя менять скидки, оплату, менеджера и типовые условия. "
-                "НДС меняет только начальник отдельной командой /vat."
+                "Условия оплаты, поставки и скидку можно менять всем ролям. "
+                "Нельзя менять через текст КП менеджера, права доступа и реквизиты продавца. "
+                "НДС уже включён в цену; изменение ставки — только начальником через /vat."
             )
         if self.delivery_terms is not None:
             text = self.delivery_terms.casefold().strip().rstrip(".")
             match = re.fullmatch(
                 r"(?:в течение )?(\d{1,3}) (рабочих |календарных )?(?:дней|дня|день)"
-                r"(?: после (?:поступления )?(?:полной )?оплаты)?",
+                r"( после (?:поступления )?(?:полной )?оплаты)?",
                 text,
             )
-            if not match or not 1 <= int(match[1]) <= 730:
-                raise BusinessError(
-                    "Срок поставки задаётся числом дней, например «10 рабочих дней» "
-                    "или «30 календарных дней». Условия оплаты и доставки фиксированы."
-                )
-            kind = (match[2] or "календарных ").strip()
-            self.delivery_terms = f"В течение {int(match[1])} {kind} дней после полной оплаты."
+            if match:
+                if not 1 <= int(match[1]) <= 730:
+                    raise BusinessError("Срок поставки должен быть от 1 до 730 дней.")
+                kind = (match[2] or "календарных ").strip()
+                self.delivery_terms = f"В течение {int(match[1])} {kind} дней{match[3] or ''}."
+        for key in ("payment_terms", "collection", "delivery_terms", "additional_terms"):
+            value = getattr(self, key)
+            if value is not None:
+                value = value.strip()
+                if not value and key != "additional_terms":
+                    raise BusinessError("Условия не могут быть пустыми.")
+                setattr(self, key, value)
         return self
 
 
