@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Date,
     ForeignKey,
     Integer,
     JSON,
@@ -86,6 +87,27 @@ class Audit(Base):
     quote_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class MeetingProtocol(Base):
+    __tablename__ = "meeting_protocols"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.telegram_id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class ProtocolTask(Base):
+    __tablename__ = "protocol_tasks"
+    __table_args__ = (UniqueConstraint("protocol_id", "position"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    protocol_id: Mapped[int] = mapped_column(ForeignKey("meeting_protocols.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(Text)
+    assignee: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    due_text: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class AppValue(Base):

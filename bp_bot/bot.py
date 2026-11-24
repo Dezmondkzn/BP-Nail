@@ -20,10 +20,13 @@ from .catalog import ProductChoice
 from .domain import BusinessError, ProposalPatch, authorize
 from .models import AppValue
 from .documents import validate_letterhead
+from .secretary import Secretary, format_protocol
 
 log = logging.getLogger(__name__)
 HELP = """АТехника — коммерческие предложения
 /secretary — протокол встречи или звонка
+/protocols — мои сохранённые протоколы
+/protocol НОМЕР — открыть протокол
 /new — новое КП, затем напишите запрос или отправьте голосовое
 /catalog [поиск] — каталог с SKU
 /my — доступные КП
@@ -58,6 +61,7 @@ USER_ROLES = {"manager": "Менеджер", "sales_head": "Руководите
 MENU_COMMANDS = [
     ("new", "Новое КП"),
     ("secretary", "Секретарь"),
+    ("protocols", "Мои протоколы"),
     ("catalog", "Каталог"),
     ("my", "Мои КП"),
     ("cancel", "Отменить ввод"),
@@ -111,8 +115,42 @@ def format_view(v):
 class UI:
     def __init__(self, bot, quotes, ai, store, settings):
         self.bot, self.quotes, self.ai, self.store, self.settings = bot, quotes, ai, store, settings
+        self.secretary = Secretary(quotes.sessions)
         self.dp = Dispatcher()
         self.register()
+
+    async def show_protocol(self, message, protocol_id):
+        view = await asyncio.to_thread(self.secretary.view, message.chat.id, protocol_id)
+        await self.send(
+            message,
+            f"Сохранённый протокол №{view['id']} · {view['kind']}\n" + format_protocol(view["payload"]),
+            InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Мои протоколы", callback_data="protocols:0")]]
+            ),
+        )
+
+    async def list_protocols(self, message, page=0):
+        result = await asyncio.to_thread(self.secretary.list, message.chat.id, page)
+        lines = [f"Мои протоколы · страница {page + 1}"]
+        keyboard = []
+        for item in result["items"]:
+            label = f"№{item['id']} · {item['kind']} · {item['client'] or 'Клиент не указан'}"
+            lines.append(
+                label + f"\n{item['meeting_date'] or 'Дата не указана'} · {item['subject'] or 'Без темы'}"
+            )
+            keyboard.append([InlineKeyboardButton(text=label[:60], callback_data=f"protocol:{item['id']}")])
+        if not result["items"]:
+            lines.append("Сохранённых протоколов нет. Создайте и подтвердите протокол через /secretary.")
+        navigation = []
+        if page:
+            navigation.append(InlineKeyboardButton(text="Назад", callback_data=f"protocols:{page - 1}"))
+        if result["has_next"]:
+            navigation.append(InlineKeyboardButton(text="Далее", callback_data=f"protocols:{page + 1}"))
+        if navigation:
+            keyboard.append(navigation)
+        await self.send(
+            message, "\n\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+        )
 
     def state(self, uid, value=None, delete=False):
         with self.quotes.sessions.begin() as s:
@@ -465,7 +503,8 @@ class UI:
                     await asyncio.to_thread(self.state, uid, {**state, "draft": draft, "token": token})
                     await self.send(
                         m,
-                        f"Черновик · {state['kind']}\n{draft}\n\nПришлите поправку текстом или голосом либо подтвердите.",
+                        f"Черновик · {state['kind']}\n{format_protocol(draft)}\n\n"
+                        "Пришлите поправку текстом или голосом либо подтвердите для сохранения в «Мои протоколы».",
                         InlineKeyboardMarkup(
                             inline_keyboard=[
                                 [
@@ -565,6 +604,10 @@ class UI:
                         await m.answer(
                             "Напишите изменения. Для замены техники перечислите весь новый состав КП."
                         )
+                elif command == "/protocols":
+                    await self.list_protocols(m)
+                elif command == "/protocol":
+                    await self.show_protocol(m, int(parts[1]))
                 elif command == "/history":
                     await self.history(m, int(parts[1]))
                 elif command == "/finish":
@@ -686,6 +729,13 @@ class UI:
                 if data[0] == "cancel":
                     await asyncio.to_thread(self.state, uid, delete=True)
                     await c.message.answer("Ввод отменён.")
+                elif len(data) == 2 and data[0] == "protocols":
+                    await self.list_protocols(c.message, int(data[1]))
+                elif len(data) == 2 and data[0] == "protocol":
+                    await self.show_protocol(c.message, int(data[1]))
+                elif len(data) == 3 and data[0] == "sec" and data[2] == "ok":
+                    protocol_id = await asyncio.to_thread(self.secretary.confirm, uid, data[1])
+                    await self.show_protocol(c.message, protocol_id)
                 elif data[0] == "sec":
                     st = await asyncio.to_thread(self.state, uid)
                     if len(data) != 3 or not st or st.get("token") != data[1]:
@@ -693,9 +743,6 @@ class UI:
                     if st["mode"] == "secretary_kind" and data[2] in {"Встреча", "Звонок"}:
                         await asyncio.to_thread(self.state, uid, {"mode": "secretary", "kind": data[2]})
                         await c.message.answer("Напишите или надиктуйте итоги. Отмена: /cancel.")
-                    elif st["mode"] == "secretary" and data[2] == "ok" and st.get("draft"):
-                        await self.send(c.message, f"Подтверждённый протокол · {st['kind']}\n{st['draft']}")
-                        await asyncio.to_thread(self.state, uid, delete=True)
                 elif data == ["users", "add"]:
                     await self.start_user_creation(c.message, uid)
                 elif data == ["users", "disable"]:
